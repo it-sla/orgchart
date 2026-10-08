@@ -16,6 +16,7 @@ export type EmployeeInput = Omit<Employee, "id" | "created_at" | "department_nam
 export type Department = { id: number; name: string; description: string; is_active: boolean; employee_count: number; active_employee_count: number };
 export type DepartmentInput = Pick<Department, "name" | "description" | "is_active">;
 export type Settings = { id: number; company_name: string; logo_path: string | null };
+export type CompanyInfo = Settings & { employee_count: number };
 export type OrgChartData = {
   company: Settings;
   board: Employee[];
@@ -25,8 +26,16 @@ export type OrgChartData = {
 
 export const imgUrl = (p: string | null) => (p ? `/uploads/${p}` : undefined);
 
+// The selected company travels with every request as X-Company-Id.
+const COMPANY_KEY = "orgchart-company";
+let companyId = 1;
+try { companyId = Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { /* storage unavailable: default company */ }
+export const currentCompany = () => companyId;
+export const selectCompany = (id: number) => { companyId = id; try { localStorage.setItem(COMPANY_KEY, String(id)); } catch { /* not remembered */ } };
+const withCompany = (init: RequestInit = {}): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string>), "X-Company-Id": String(companyId) } });
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, init);
+  const r = await fetch(url, withCompany(init));
   if (!r.ok) {
     throw await responseError(r);
   }
@@ -45,13 +54,15 @@ const json = (method: string, body: unknown): RequestInit => ({
 });
 
 export const api = {
+  companies: () => req<CompanyInfo[]>("/api/companies"),
+  createCompany: (company_name: string) => req<CompanyInfo>("/api/companies", json("POST", { company_name })),
   departments: () => req<Department[]>("/api/departments"),
   department: (id: number) => req<Department>(`/api/departments/${id}`),
   createDepartment: (d: DepartmentInput) => req<Department>("/api/departments", json("POST", d)),
   updateDepartment: (id: number, d: DepartmentInput) => req<Department>(`/api/departments/${id}`, json("PUT", d)),
   removeDepartment: (id: number, hard = false) => req(`/api/departments/${id}?hard=${hard}`, { method: "DELETE" }),
   exportPdf: async (options: { scope: "full" | "visible"; ids: number[]; paper: string; orientation: string; layout: string; positions: { id: string; x: number; y: number; depth: number; stacked?: boolean; label?: string }[] }) => {
-    const r = await fetch("/api/export/pdf", json("POST", options));
+    const r = await fetch("/api/export/pdf", withCompany(json("POST", options)));
     if (!r.ok) throw await responseError(r);
     return r.blob();
   },

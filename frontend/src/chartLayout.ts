@@ -7,10 +7,10 @@ const W = 240, H = 100, GAP = 48;
 export const TREE_H = 76, GROUP_ID = -1;
 const STACK_X = 24, STACK_TOP = 20, STEP = TREE_H + 10, COLS = 5;
 
-/** People with no manager and no reports: shown in one "Not yet placed" group in tree mode. */
+/** People with no manager and no reports: shown in one "Not yet placed" group in tree mode. Board members are top-level on purpose. */
 export const unplacedIds = (d: OrgChartData) => {
   const linked = new Set(d.edges.flatMap((e) => [e.source, e.target]));
-  return d.edges.length ? d.nodes.filter((n) => !linked.has(n.id)).map((n) => n.id) : [];
+  return d.edges.length ? d.nodes.filter((n) => !linked.has(n.id) && !n.is_board_member).map((n) => n.id) : [];
 };
 
 function addBoard(nodes: Node[], d: OrgChartData) {

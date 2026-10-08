@@ -188,7 +188,7 @@ def test_existing_database_department_migration_is_additive_and_idempotent(tmp_p
     with database.connect() as connection:
         assert "department_id" in {column["name"] for column in inspect(connection).get_columns("employees")}
         rows = connection.execute(text("SELECT * FROM employees ORDER BY id")).all()
-        assert rows == [(1, "Existing manager", "Director", None, None), (2, "Existing employee", "Executive", 1, None)]
+        assert rows == [(1, "Existing manager", "Director", None, None, 1), (2, "Existing employee", "Executive", 1, None, 1)]
     database.dispose()
 
 
@@ -227,3 +227,26 @@ def test_tree_pdf_with_stacked_team_and_group():
     assert response.status_code == 200, response.text
     text = " ".join(PdfReader(io.BytesIO(response.content)).pages[0].extract_text().split())
     assert "Not yet placed (1)" in text and "stack kid 2" in text and "loose person" in text
+
+
+def test_companies_are_isolated():
+    other = c.post("/api/companies", json={"company_name": "Second Co"})
+    assert other.status_code == 201
+    h = {"X-Company-Id": str(other.json()["id"])}
+    assert c.post("/api/companies", json={"company_name": "second co"}).status_code == 409
+    mine = mk("Company one boss")
+    dep1 = c.post("/api/departments", json={"name": "Shared name"}).json()["id"]
+    r = c.post("/api/employees", json={"name": "Second Co boss"}, headers=h)
+    assert r.status_code == 201
+    theirs = r.json()["id"]
+    assert c.post("/api/departments", json={"name": "Shared name"}, headers=h).status_code == 201
+    assert [e["name"] for e in c.get("/api/employees", headers=h).json()] == ["Second Co boss"]
+    assert "Second Co boss" not in [e["name"] for e in c.get("/api/employees").json()]
+    assert [d["name"] for d in c.get("/api/departments", headers=h).json()] == ["Shared name"]
+    assert c.get(f"/api/employees/{theirs}").status_code == 404
+    assert c.post("/api/employees", json={"name": "x", "reports_to_id": mine}, headers=h).status_code == 400
+    assert c.post("/api/employees", json={"name": "x", "department_id": dep1}, headers=h).status_code == 400
+    assert [n["name"] for n in c.get("/api/org-chart", headers=h).json()["nodes"]] == ["Second Co boss"]
+    assert c.get("/api/org-chart", headers=h).json()["company"]["company_name"] == "Second Co"
+    assert c.get("/api/employees", headers={"X-Company-Id": "999"}).status_code == 404
+    assert {x["company_name"] for x in c.get("/api/companies").json()} >= {"Second Co"}

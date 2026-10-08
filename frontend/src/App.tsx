@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, imgUrl, type Employee, type EmployeeInput, type Department, type Settings } from "./api";
+import { api, currentCompany, selectCompany, imgUrl, type CompanyInfo, type Employee, type EmployeeInput, type Department, type Settings } from "./api";
 import OrgChart, { Avatar } from "./OrgChart";
 import Departments from "./Departments";
 
@@ -95,7 +95,7 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
   useEffect(() => { if (!toast || toast.bad) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
   const byId = useMemo(() => new Map(all.map((e) => [e.id, e])), [all]);
   const name = (id: number | null) => id ? byId.get(id)?.name ?? "Unknown manager" : "Top of hierarchy";
-  const needsSetup = (e: Employee) => e.is_active && (e.department_id === null || e.reports_to_id === null);
+  const needsSetup = (e: Employee) => e.is_active && (e.department_id === null || (e.reports_to_id === null && !e.is_board_member));
   const setupCount = all.filter(needsSetup).length;
   const titles = useMemo(() => [...new Set(all.map((e) => e.designation).filter(Boolean))].sort(), [all]);
   const filtered = all.filter((e) => `${e.name} ${e.designation} ${e.department_name ?? "Unassigned"} ${name(e.reports_to_id)}`.toLowerCase().includes(query.trim().toLowerCase()) && (tab === "all" || (tab === "setup" ? needsSetup(e) : !e.is_active)) && (board === "all" || e.is_board_member === (board === "yes")) && (!department || (department === "none" ? e.department_id === null : e.department_id === Number(department))) && (!role || (role === "none" ? !e.designation : e.designation === role)) && (!manager || (manager === "none" ? e.reports_to_id === null : e.reports_to_id === Number(manager))));
@@ -198,15 +198,39 @@ function CompanySettings({ onSaved }: { onSaved: () => void }) {
   </form>}</div>;
 }
 const pages = ["Organization Chart", "Employees", "Departments", "Company Settings"] as const;
+function AddCompany({ onCreated, onCancel }: { onCreated: (c: CompanyInfo) => void; onCancel: () => void }) {
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    if (!name.trim()) { setErr("Enter a company name."); return; }
+    setBusy(true); setErr("");
+    try { onCreated(await api.createCompany(name.trim())); } catch (e) { setErr(message(e)); setBusy(false); }
+  };
+  return <div className="modal"><form className="card form" role="dialog" aria-modal="true" aria-labelledby="add-company-title" onSubmit={submit} onKeyDown={(ev) => { if (ev.key === "Escape") onCancel(); }}>
+    <h3 id="add-company-title">Add company</h3>
+    <label>Company name<input autoFocus required maxLength={200} value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
+    <p className="muted">Each company has its own employees, departments and chart. You can add a logo in Company Settings afterwards.</p>
+    {err && <p className="err" role="alert">{err}</p>}
+    <div className="row end"><button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button><button className="btn primary" disabled={busy}>{busy ? "Adding..." : "Add company"}</button></div>
+  </form></div>;
+}
 export default function App() {
   const [page, setPage] = useState<(typeof pages)[number]>("Organization Chart");
   const [departmentFilter, setDepartmentFilter] = useState("");
   const [company, setCompany] = useState<Settings | null>(null);
   const [brandError, setBrandError] = useState("");
+  const [companies, setCompanies] = useState<CompanyInfo[]>([]);
+  const [companyId, setCompanyId] = useState(currentCompany);
+  const [adding, setAdding] = useState(false);
+  const switchTo = (id: number) => { selectCompany(id); setCompanyId(id); setDepartmentFilter(""); };
   const loadCompany = async () => { setBrandError(""); try { setCompany(await api.settings()); } catch (e) { setBrandError(message(e)); } };
-  useEffect(() => { void loadCompany(); }, []);
-  return <div className="app"><header><div className="brand">{company?.logo_path && <img src={imgUrl(company.logo_path)} alt="" />}<b>{company?.company_name || "Organization"}</b></div><nav aria-label="Main navigation">{pages.map((p) => <button key={p} aria-current={p === page ? "page" : undefined} className={p === page ? "on" : ""} onClick={() => { if (p === "Employees") setDepartmentFilter(""); setPage(p); }}>{p}</button>)}</nav></header>
+  const loadCompanies = async () => { try { const list = await api.companies(); setCompanies(list); if (list.length && !list.some((c) => c.id === currentCompany())) switchTo(list[0].id); } catch { /* the brand error banner covers load failures */ } };
+  useEffect(() => { void loadCompany(); void loadCompanies(); }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <div className="app"><header><div className="brand">{company?.logo_path && <img src={imgUrl(company.logo_path)} alt="" />}{companies.length ? <label className="company-switch"><span className="sr-only">Company</span><select value={companyId} onChange={(e) => e.target.value === "add" ? setAdding(true) : switchTo(Number(e.target.value))}>{companies.map((c) => <option key={c.id} value={c.id}>{c.company_name}</option>)}<option value="add">+ Add company...</option></select></label> : <b>{company?.company_name || "Organization"}</b>}</div><nav aria-label="Main navigation">{pages.map((p) => <button key={p} aria-current={p === page ? "page" : undefined} className={p === page ? "on" : ""} onClick={() => { if (p === "Employees") setDepartmentFilter(""); setPage(p); }}>{p}</button>)}</nav></header>
     {brandError && <div className="brand-error" role="alert">Company details could not load. <button className="btn" onClick={() => void loadCompany()}>Retry</button></div>}
-    <main>{page === "Organization Chart" && <OrgChart />}{page === "Employees" && <Employees key={departmentFilter} initialDepartment={departmentFilter} />}{page === "Departments" && <Departments onViewEmployees={(id) => { setDepartmentFilter(String(id)); setPage("Employees"); }} />}{page === "Company Settings" && <CompanySettings onSaved={() => void loadCompany()} />}</main>
+    <main key={companyId}>{page === "Organization Chart" && <OrgChart />}{page === "Employees" && <Employees key={departmentFilter} initialDepartment={departmentFilter} />}{page === "Departments" && <Departments onViewEmployees={(id) => { setDepartmentFilter(String(id)); setPage("Employees"); }} />}{page === "Company Settings" && <CompanySettings onSaved={() => { void loadCompany(); void loadCompanies(); }} />}</main>
+    {adding && <AddCompany onCancel={() => setAdding(false)} onCreated={(c) => { setAdding(false); switchTo(c.id); }} />}
   </div>;
 }

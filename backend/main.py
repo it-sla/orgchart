@@ -5,7 +5,7 @@ import io
 import warnings
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image, UnidentifiedImageError
@@ -43,7 +43,9 @@ class CompanySettings(Base):
 class Department(Base):
     __tablename__ = "departments"
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("company_settings.id"), default=1)
     name: Mapped[str]
+    # "{company_id}:{casefolded name}" so names are unique per company.
     name_key: Mapped[str] = mapped_column(unique=True)
     description: Mapped[str] = mapped_column(default="")
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -52,6 +54,7 @@ class Department(Base):
 class Employee(Base):
     __tablename__ = "employees"
     id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("company_settings.id"), default=1)
     name: Mapped[str]
     designation: Mapped[str] = mapped_column(default="")
     department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), default=None)
@@ -72,6 +75,14 @@ def migrate_employee_fields(database_engine):
         columns = {column["name"] for column in inspect(connection).get_columns("employees")}
         if "department_id" not in columns:
             connection.execute(text("ALTER TABLE employees ADD COLUMN department_id INTEGER REFERENCES departments(id)"))
+        # Multi-company: existing rows belong to company 1. SQLite cannot add a REFERENCES column with a
+        # non-NULL default, so existing databases get a plain column (validated in code).
+        tables = inspect(connection).get_table_names()
+        for table in ("employees", "departments"):
+            if table in tables and "company_id" not in {c["name"] for c in inspect(connection).get_columns(table)}:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN company_id INTEGER NOT NULL DEFAULT 1"))
+        if "departments" in tables:
+            connection.execute(text("UPDATE departments SET name_key = company_id || ':' || name_key WHERE substr(name_key, 1, length(company_id) + 1) != company_id || ':'"))
 
 
 migrate_employee_fields(engine)
@@ -81,9 +92,17 @@ with SessionLocal() as _s:
         _s.commit()
 
 
-def db():
+def db(x_company_id: int = Header(1)):
+    """Session scoped to the company named by the X-Company-Id header (default 1)."""
     with SessionLocal() as s:
+        if not s.get(CompanySettings, x_company_id):
+            raise HTTPException(404, "Company not found")
+        s.info["company_id"] = x_company_id
         yield s
+
+
+def cid(s: Session) -> int:
+    return s.info["company_id"]
 
 
 class EmployeeIn(BaseModel):
@@ -103,6 +122,11 @@ class SettingsIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     company_name: str = Field(min_length=1, max_length=200)
     logo_path: str | None = None
+
+
+class CompanyIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    company_name: str = Field(min_length=1, max_length=200)
 
 
 class DepartmentIn(BaseModel):
@@ -129,13 +153,13 @@ def validate_department(s: Session, department_id: int | None, previous_id: int 
     if department_id is None:
         return
     department = s.get(Department, department_id)
-    if not department or (not department.is_active and department_id != previous_id):
+    if not department or department.company_id != cid(s) or (not department.is_active and department_id != previous_id):
         raise HTTPException(400, "Choose an existing active department")
 
 
 def get_emp(s: Session, id: int) -> Employee:
     e = s.get(Employee, id)
-    if not e:
+    if not e or e.company_id != cid(s):
         raise HTTPException(404, "Employee not found")
     return e
 
@@ -147,7 +171,7 @@ def validate_manager(s: Session, emp_id: int | None, manager_id: int | None):
     if manager_id == emp_id:
         raise HTTPException(400, "An employee cannot report to themselves")
     m = s.get(Employee, manager_id)
-    if not m or not m.is_active:
+    if not m or not m.is_active or m.company_id != cid(s):
         raise HTTPException(400, "Manager must be an existing active employee")
     # Walk up from the proposed manager; meeting emp_id means the manager is below the employee.
     seen, cur = set(), m
@@ -172,12 +196,23 @@ def release_reports(s: Session, e: Employee):
 
 
 def settings_dict(s: Session):
-    c = s.get(CompanySettings, 1)
+    c = s.get(CompanySettings, cid(s))
     return {"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path}
 
 
 app = FastAPI(title="Org Chart")
 app.mount("/uploads", StaticFiles(directory=UPLOADS), name="uploads")
+
+
+def company_employees(s: Session):
+    return s.scalars(select(Employee).where(Employee.company_id == cid(s))).all()
+
+
+def find_department(s: Session, id: int) -> Department:
+    department = s.get(Department, id)
+    if not department or department.company_id != cid(s):
+        raise HTTPException(404, "Department not found")
+    return department
 
 
 def department_dict(department: Department, employees):
@@ -189,26 +224,23 @@ def department_dict(department: Department, employees):
 
 @app.get("/api/departments")
 def list_departments(s: Session = Depends(db)):
-    employees = s.scalars(select(Employee)).all()
-    return [department_dict(d, employees) for d in s.scalars(select(Department).order_by(Department.name_key)).all()]
+    employees = company_employees(s)
+    return [department_dict(d, employees) for d in s.scalars(select(Department).where(Department.company_id == cid(s)).order_by(Department.name_key)).all()]
 
 
 @app.get("/api/departments/{id}")
 def get_department(id: int, s: Session = Depends(db)):
-    department = s.get(Department, id)
-    if not department:
-        raise HTTPException(404, "Department not found")
-    return department_dict(department, s.scalars(select(Employee)).all())
+    return department_dict(find_department(s, id), company_employees(s))
 
 
 def save_department(body: DepartmentIn, s: Session, department: Department | None = None):
     name = " ".join(body.name.split())
-    key = name.casefold()
+    key = f"{cid(s)}:{name.casefold()}"
     duplicate = s.scalar(select(Department).where(Department.name_key == key))
     if duplicate and (department is None or duplicate.id != department.id):
         raise HTTPException(409, "A department with this name already exists, including archived departments")
     if department is None:
-        department = Department(name=name, name_key=key)
+        department = Department(name=name, name_key=key, company_id=cid(s))
         s.add(department)
     department.name, department.name_key = name, key
     department.description, department.is_active = body.description, body.is_active
@@ -217,7 +249,7 @@ def save_department(body: DepartmentIn, s: Session, department: Department | Non
     except IntegrityError:
         s.rollback()
         raise HTTPException(409, "A department with this name already exists")
-    return department_dict(department, s.scalars(select(Employee)).all())
+    return department_dict(department, company_employees(s))
 
 
 @app.post("/api/departments", status_code=201)
@@ -227,17 +259,12 @@ def create_department(body: DepartmentIn, s: Session = Depends(db)):
 
 @app.put("/api/departments/{id}")
 def update_department(id: int, body: DepartmentIn, s: Session = Depends(db)):
-    department = s.get(Department, id)
-    if not department:
-        raise HTTPException(404, "Department not found")
-    return save_department(body, s, department)
+    return save_department(body, s, find_department(s, id))
 
 
 @app.delete("/api/departments/{id}")
 def delete_department(id: int, hard: bool = False, s: Session = Depends(db)):
-    department = s.get(Department, id)
-    if not department:
-        raise HTTPException(404, "Department not found")
+    department = find_department(s, id)
     if hard:
         if department.is_active:
             raise HTTPException(409, "Archive the department before permanently deleting it")
@@ -256,7 +283,7 @@ def delete_department(id: int, hard: bool = False, s: Session = Depends(db)):
 
 @app.get("/api/employees")
 def list_employees(s: Session = Depends(db)):
-    es = s.scalars(select(Employee).order_by(Employee.display_order, Employee.name)).all()
+    es = s.scalars(select(Employee).where(Employee.company_id == cid(s)).order_by(Employee.display_order, Employee.name)).all()
     return [emp_dict(e) for e in es]
 
 
@@ -270,7 +297,7 @@ def create_employee(body: EmployeeIn, s: Session = Depends(db)):
     validate_image_reference(body.photo_path)
     validate_department(s, body.department_id)
     validate_manager(s, None, body.reports_to_id)
-    e = Employee(**body.model_dump())
+    e = Employee(**body.model_dump(), company_id=cid(s))
     s.add(e)
     s.commit()
     return emp_dict(e)
@@ -333,7 +360,7 @@ def chain(id: int, s: Session = Depends(db)):
 
 @app.get("/api/org-chart")
 def org_chart(s: Session = Depends(db)):
-    es = s.scalars(select(Employee).where(Employee.is_active).order_by(Employee.display_order, Employee.name)).all()
+    es = s.scalars(select(Employee).where(Employee.is_active, Employee.company_id == cid(s)).order_by(Employee.display_order, Employee.name)).all()
     ids = {e.id for e in es}
     board = sorted((e for e in es if e.is_board_member), key=lambda e: (e.board_order, e.name))
     return {
@@ -344,6 +371,24 @@ def org_chart(s: Session = Depends(db)):
     }
 
 
+@app.get("/api/companies")
+def list_companies(s: Session = Depends(db)):
+    counts = dict(s.execute(select(Employee.company_id, func.count()).where(Employee.is_active).group_by(Employee.company_id)).all())
+    return [{"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": counts.get(c.id, 0)}
+            for c in s.scalars(select(CompanySettings).order_by(CompanySettings.id)).all()]
+
+
+@app.post("/api/companies", status_code=201)
+def create_company(body: CompanyIn, s: Session = Depends(db)):
+    name = " ".join(body.company_name.split())
+    if any(c.company_name.casefold() == name.casefold() for c in s.scalars(select(CompanySettings)).all()):
+        raise HTTPException(409, "A company with this name already exists")
+    c = CompanySettings(company_name=name)
+    s.add(c)
+    s.commit()
+    return {"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": 0}
+
+
 @app.get("/api/settings")
 def get_settings(s: Session = Depends(db)):
     return settings_dict(s)
@@ -352,7 +397,7 @@ def get_settings(s: Session = Depends(db)):
 @app.put("/api/settings")
 def put_settings(body: SettingsIn, s: Session = Depends(db)):
     validate_image_reference(body.logo_path)
-    c = s.get(CompanySettings, 1)
+    c = s.get(CompanySettings, cid(s))
     c.company_name, c.logo_path = body.company_name, body.logo_path
     s.commit()
     return settings_dict(s)

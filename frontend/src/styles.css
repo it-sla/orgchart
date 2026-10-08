@@ -283,3 +283,7 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 @media (max-width: 700px) { .tabs { width: 100%; overflow-x: auto; } .directory-bar .directory-search { max-width: none; } }
 .emp-table td.board-cell { text-align: center; width: 64px; }
 .emp-table td.board-cell input { width: 20px; height: 20px; min-height: 0; cursor: pointer; }
+
+/* Company switcher in the header */
+.company-switch select { min-height: 36px; max-width: 260px; padding: 4px 28px 4px 8px; border: 1px solid transparent; border-radius: 8px; background-color: transparent; font: inherit; font-weight: 700; color: inherit; cursor: pointer; }
+.company-switch select:hover, .company-switch select:focus-visible { border-color: #cbd5e1; background-color: #f8fafc; }
