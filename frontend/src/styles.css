@@ -281,3 +281,5 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .toast.bad { background: #9f1239; }
 .toast .btn { min-height: 30px; padding: 2px 10px; color: #0f172a; }
 @media (max-width: 700px) { .tabs { width: 100%; overflow-x: auto; } .directory-bar .directory-search { max-width: none; } }
+.emp-table td.board-cell { text-align: center; width: 64px; }
+.emp-table td.board-cell input { width: 20px; height: 20px; min-height: 0; cursor: pointer; }
