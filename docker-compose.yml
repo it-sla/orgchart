@@ -1,0 +1,10 @@
+services:
+  orgchart:
+    build: .
+    container_name: orgchart
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./data:/data
+      - ./data/uploads:/app/backend/uploads
