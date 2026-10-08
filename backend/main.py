@@ -458,6 +458,11 @@ class ExportIn(BaseModel):
 def export_pdf(body: ExportIn, s: Session = Depends(db)):
     from pdf_export import make_pdf, make_chart_pdf
     data = org_chart(s)
+    # Board members with no manager appear only in the Board of Directors box (matches the chart).
+    mgr = {e["target"] for e in data["edges"]}
+    top = {e["id"] for e in data["nodes"] if e["is_board_member"] and e["id"] not in mgr}
+    data["nodes"] = [e for e in data["nodes"] if e["id"] not in top]
+    data["edges"] = [e for e in data["edges"] if e["source"] not in top]
     if body.scope == "visible":
         ids = set(body.ids)
         data["nodes"] = [e for e in data["nodes"] if e["id"] in ids]

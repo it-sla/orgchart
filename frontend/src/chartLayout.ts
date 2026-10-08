@@ -68,7 +68,11 @@ function buildTree(d: OrgChartData, collapsed: Set<number>, visible: Set<number>
 }
 
 
-export function buildLayout(d: OrgChartData, collapsed: Set<number>, mode: LayoutMode) {
+export function buildLayout(full: OrgChartData, collapsed: Set<number>, mode: LayoutMode) {
+  // Board members with no manager appear only in the Board of Directors box.
+  const mgr = new Set(full.edges.map((e) => e.target));
+  const top = new Set(full.nodes.filter((n) => n.is_board_member && !mgr.has(n.id)).map((n) => n.id));
+  const d = { ...full, nodes: full.nodes.filter((n) => !top.has(n.id)), edges: full.edges.filter((e) => !top.has(e.source)) };
   const compact = mode === "compact";
   const kidsOf = new Map<number, number[]>();
   d.edges.forEach((e) => kidsOf.set(e.source, [...(kidsOf.get(e.source) ?? []), e.target]));
