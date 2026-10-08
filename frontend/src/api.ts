@@ -50,7 +50,7 @@ export const api = {
   createDepartment: (d: DepartmentInput) => req<Department>("/api/departments", json("POST", d)),
   updateDepartment: (id: number, d: DepartmentInput) => req<Department>(`/api/departments/${id}`, json("PUT", d)),
   removeDepartment: (id: number, hard = false) => req(`/api/departments/${id}?hard=${hard}`, { method: "DELETE" }),
-  exportPdf: async (options: { scope: "full" | "visible"; ids: number[]; paper: string; orientation: string; layout: string; positions: { id: string; x: number; y: number; depth: number }[] }) => {
+  exportPdf: async (options: { scope: "full" | "visible"; ids: number[]; paper: string; orientation: string; layout: string; positions: { id: string; x: number; y: number; depth: number; stacked?: boolean; label?: string }[] }) => {
     const r = await fetch("/api/export/pdf", json("POST", options));
     if (!r.ok) throw await responseError(r);
     return r.blob();

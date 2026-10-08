@@ -396,6 +396,8 @@ class ChartPosition(BaseModel):
     x: float = Field(ge=-1000000, le=1000000, allow_inf_nan=False)
     y: float = Field(ge=-1000000, le=1000000, allow_inf_nan=False)
     depth: int = Field(default=0, ge=0, le=10000)
+    stacked: bool = False
+    label: str = Field(default="", max_length=100)
 
 
 class ExportIn(BaseModel):

@@ -4,6 +4,69 @@ import type { OrgChartData } from "./api";
 import { radialPositions, PORTRAIT_W, PORTRAIT_H, COMPANY_SIZE } from "./radialLayout";
 export type LayoutMode = "radial" | "compact" | "tree";
 const W = 240, H = 100, GAP = 48;
+export const TREE_H = 76, GROUP_ID = -1;
+const STACK_X = 24, STACK_TOP = 20, STEP = TREE_H + 10, COLS = 5;
+
+/** People with no manager and no reports: shown in one "Not yet placed" group in tree mode. */
+export const unplacedIds = (d: OrgChartData) => {
+  const linked = new Set(d.edges.flatMap((e) => [e.source, e.target]));
+  return d.edges.length ? d.nodes.filter((n) => !linked.has(n.id)).map((n) => n.id) : [];
+};
+
+function addBoard(nodes: Node[], d: OrgChartData) {
+  if (!d.board.length) return;
+  const root = nodes[0];
+  const bh = 44 + d.board.length * 68;
+  nodes.push({
+    id: "board", type: "board", draggable: false, selectable: false,
+    position: { x: root?.position.x ?? 0, y: -bh - GAP },
+    data: { members: d.board }, style: { width: W },
+  });
+}
+
+/** Tree: leaf-only teams stack in one column under their manager; loose people sit in one grid below. */
+function buildTree(d: OrgChartData, collapsed: Set<number>, visible: Set<number>, kidsOf: Map<number, number[]>) {
+  const loose = new Set(unplacedIds(d));
+  const isLeaf = (id: number) => !kidsOf.get(id)?.length;
+  const vis = d.nodes.filter((n) => visible.has(n.id) && !loose.has(n.id));
+  const stackOf = new Map<number, number[]>();
+  vis.forEach((n) => { const k = kidsOf.get(n.id) ?? []; if (k.length && !collapsed.has(n.id) && k.every(isLeaf)) stackOf.set(n.id, k); });
+  const stacked = new Set([...stackOf.values()].flat());
+  const size = (id: number) => { const k = stackOf.get(id); return k ? { width: W + STACK_X, height: TREE_H + STACK_TOP + k.length * STEP } : { width: W, height: TREE_H }; };
+
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: "TB", nodesep: 24, ranksep: 60 });
+  g.setDefaultEdgeLabel(() => ({}));
+  vis.filter((n) => !stacked.has(n.id)).forEach((n) => g.setNode(String(n.id), size(n.id)));
+  const edges = d.edges.filter((e) => visible.has(e.source) && visible.has(e.target) && !loose.has(e.source));
+  edges.filter((e) => !stacked.has(e.target)).forEach((e) => g.setEdge(String(e.source), String(e.target)));
+  dagre.layout(g);
+
+  const nodes: Node[] = [];
+  const byId = new Map(d.nodes.map((n) => [n.id, n]));
+  // Top-align each rank so a tall stacked team does not push its siblings down.
+  const rankTop = new Map<number, number>();
+  vis.filter((n) => !stacked.has(n.id)).forEach((n) => { const p = g.node(String(n.id)); rankTop.set(p.y, Math.min(rankTop.get(p.y) ?? Infinity, p.y - size(n.id).height / 2)); });
+  vis.filter((n) => !stacked.has(n.id)).forEach((n) => {
+    const p = g.node(String(n.id)), { width } = size(n.id);
+    const x = p.x - width / 2, y = rankTop.get(p.y)!;
+    nodes.push({ id: String(n.id), type: "emp", position: { x, y }, data: { e: n, kids: kidsOf.get(n.id)?.length ?? 0 } });
+    stackOf.get(n.id)?.forEach((id, i) => nodes.push({ id: String(id), type: "emp", position: { x: x + STACK_X, y: y + TREE_H + STACK_TOP + i * STEP }, data: { e: byId.get(id)!, kids: 0, stacked: true } }));
+  });
+  const flowEdges: Edge[] = edges.map((e) => ({ id: `${e.source}-${e.target}`, source: String(e.source), target: String(e.target), type: stacked.has(e.target) ? "rail" : "smoothstep", style: { stroke: "#a6b8c9", strokeWidth: 1.5 } }));
+  addBoard(nodes, d);
+
+  if (loose.size) {
+    const placed = nodes.filter((n) => n.id !== "board");
+    const gx = placed.length ? Math.min(...placed.map((n) => n.position.x)) : 0;
+    const gy = placed.length ? Math.max(...placed.map((n) => n.position.y + TREE_H)) + 70 : 0;
+    const closed = collapsed.has(GROUP_ID);
+    nodes.push({ id: "group", type: "group", draggable: false, selectable: false, position: { x: gx, y: gy }, style: { width: closed ? W : COLS * (W + 16) - 16 }, data: { label: `Not yet placed (${loose.size})`, closed } });
+    if (!closed) d.nodes.filter((n) => loose.has(n.id)).forEach((n, i) => nodes.push({ id: String(n.id), type: "emp", position: { x: gx + (i % COLS) * (W + 16), y: gy + 56 + Math.floor(i / COLS) * (TREE_H + 14) }, data: { e: n, kids: 0, loose: true } }));
+  }
+  return { nodes, edges: flowEdges };
+}
+
 
 export function buildLayout(d: OrgChartData, collapsed: Set<number>, mode: LayoutMode) {
   const compact = mode === "compact";
@@ -29,6 +92,8 @@ export function buildLayout(d: OrgChartData, collapsed: Set<number>, mode: Layou
     return { nodes, edges };
   }
 
+  if (mode === "tree") return buildTree(d, collapsed, visible, kidsOf);
+
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 90 });
   g.setDefaultEdgeLabel(() => ({}));
@@ -53,16 +118,7 @@ export function buildLayout(d: OrgChartData, collapsed: Set<number>, mode: Layou
     };
     d.nodes.filter((n) => !hasMgr.has(n.id)).forEach((n) => place(n.id, 0));
   }
-  if (d.board.length) {
-    const root = nodes[0];
-    const bw = W;
-    const bh = 44 + d.board.length * 68;
-    nodes.push({
-      id: "board", type: "board", draggable: false, selectable: false,
-      position: { x: root?.position.x ?? 0, y: -bh - GAP },
-      data: { members: d.board }, style: { width: bw },
-    });
-  }
+  addBoard(nodes, d);
   const flowEdges: Edge[] = edges.map((e) => ({ id: `${e.source}-${e.target}`, source: String(e.source), target: String(e.target), type: compact ? "compact" : "smoothstep", style: { stroke: "#a6b8c9", strokeWidth: 1.5 } }));
   return { nodes, edges: flowEdges };
 }

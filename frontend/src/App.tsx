@@ -59,7 +59,9 @@ function EmployeeForm({ initial, id, all, departments, onDone }: { initial: Empl
       {(file || f.photo_path) && <button className="btn" type="button" onClick={() => { setFile(null); set("photo_path", null); }}>Remove photo</button>}
       <label>Reports to<select value={f.reports_to_id ?? ""} onChange={(e) => set("reports_to_id", e.target.value ? Number(e.target.value) : null)}><option value="">None - top of hierarchy</option>{all.filter((e) => e.is_active && !forbidden.has(e.id)).map((e) => <option key={e.id} value={e.id}>{e.name} - {e.designation}</option>)}</select></label>
       <label className="check"><input type="checkbox" checked={f.is_board_member} onChange={(e) => set("is_board_member", e.target.checked)} /> Board member</label>
+      <details className="advanced"><summary>Advanced</summary>
       <div className="row"><label>Board order<input type="number" value={f.board_order} onChange={(e) => set("board_order", Number(e.target.value))} /></label><label>Display order<input type="number" value={f.display_order} onChange={(e) => set("display_order", Number(e.target.value))} /></label></div>
+      </details>
       <label className="check"><input type="checkbox" checked={f.is_active} onChange={(e) => set("is_active", e.target.checked)} /> Active</label>
       {!f.is_active && initial.is_active && <p className="notice">Direct reports will move to this employee's manager when you save.</p>}
     </fieldset>
@@ -69,66 +71,105 @@ function EmployeeForm({ initial, id, all, departments, onDone }: { initial: Empl
   </form></div>;
 }
 function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
+  const PAGE = 50;
   const [departments, setDepartments] = useState<Department[]>([]);
-  const [department, setDepartment] = useState(initialDepartment);
   const [all, setAll] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<{ id?: number; init: EmployeeInput } | null>(null);
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("all");
-  const [board, setBoard] = useState("all");
+  const [tab, setTab] = useState<"all" | "setup" | "inactive">("all");
+  const [department, setDepartment] = useState(initialDepartment);
   const [role, setRole] = useState("");
+  const [board, setBoard] = useState("all");
   const [manager, setManager] = useState("");
   const [sort, setSort] = useState("order");
   const [page, setPage] = useState(1);
-  const load = async () => { setLoading(true); setError(""); try { const [employees, departmentList] = await Promise.all([api.employees(), api.departments()]); setAll(employees); setDepartments(departmentList); } catch (e) { setError(message(e)); } finally { setLoading(false); } };
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [bulkTitle, setBulkTitle] = useState("");
+  const load = async (quiet = false) => { if (!quiet) setLoading(true); setError(""); try { const [employees, departmentList] = await Promise.all([api.employees(), api.departments()]); setAll(employees); setDepartments(departmentList); } catch (e) { setError(message(e)); } finally { setLoading(false); } };
   useEffect(() => { void load(); }, []);
-  useEffect(() => { setPage(1); }, [query, status, board, role, department, manager, sort]);
+  useEffect(() => { setPage(1); }, [query, tab, board, role, department, manager, sort]);
+  useEffect(() => { if (!toast || toast.bad) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
   const byId = useMemo(() => new Map(all.map((e) => [e.id, e])), [all]);
   const name = (id: number | null) => id ? byId.get(id)?.name ?? "Unknown manager" : "Top of hierarchy";
-  const filtered = all.filter((e) => `${e.name} ${e.designation} ${e.department_name ?? "Unassigned"} ${name(e.reports_to_id)}`.toLowerCase().includes(query.trim().toLowerCase()) && (status === "all" || e.is_active === (status === "active")) && (board === "all" || e.is_board_member === (board === "yes")) && (!department || (department === "none" ? e.department_id === null : e.department_id === Number(department))) && (!role || (role === "none" ? !e.designation : e.designation === role)) && (!manager || (manager === "none" ? e.reports_to_id === null : e.reports_to_id === Number(manager))));
+  const needsSetup = (e: Employee) => e.is_active && (e.department_id === null || e.reports_to_id === null);
+  const setupCount = all.filter(needsSetup).length;
+  const titles = useMemo(() => [...new Set(all.map((e) => e.designation).filter(Boolean))].sort(), [all]);
+  const filtered = all.filter((e) => `${e.name} ${e.designation} ${e.department_name ?? "Unassigned"} ${name(e.reports_to_id)}`.toLowerCase().includes(query.trim().toLowerCase()) && (tab === "all" || (tab === "setup" ? needsSetup(e) : !e.is_active)) && (board === "all" || e.is_board_member === (board === "yes")) && (!department || (department === "none" ? e.department_id === null : e.department_id === Number(department))) && (!role || (role === "none" ? !e.designation : e.designation === role)) && (!manager || (manager === "none" ? e.reports_to_id === null : e.reports_to_id === Number(manager))));
   if (sort !== "order") filtered.sort((a, b) => sort === "name-desc" ? b.name.localeCompare(a.name) : sort === "role" ? a.designation.localeCompare(b.designation) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
-  const pages = Math.max(1, Math.ceil(filtered.length / 15)), current = Math.min(page, pages);
-  const shown = filtered.slice((current - 1) * 15, current * 15);
-  const below = (id: number) => { const s = new Set<number>(); let c = true; while (c) { c = false; for (const p of all) if (p.reports_to_id !== null && (p.reports_to_id === id || s.has(p.reports_to_id)) && !s.has(p.id)) { s.add(p.id); c = true; } } return s; };
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE)), current = Math.min(page, pages);
+  const shown = filtered.slice((current - 1) * PAGE, current * PAGE);
+  const below = (ids: Iterable<number>) => { const s = new Set<number>(ids); let c = true; while (c) { c = false; for (const p of all) if (p.reports_to_id !== null && s.has(p.reports_to_id) && !s.has(p.id)) { s.add(p.id); c = true; } } return s; };
+  const patch = (e: Employee, change: Partial<EmployeeInput>) => { const { id, name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id } = e; return api.update(id, { name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id, ...change }); };
   const quickSave = async (e: Employee, change: Partial<EmployeeInput>) => {
-    setBusyId(e.id); setActionError(""); setNotice("");
-    try { const { id, name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id } = e; await api.update(id, { name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id, ...change }); setNotice(`${e.name} updated.`); await load(); } catch (x) { setActionError(message(x)); } finally { setBusyId(null); }
+    setBusy(true); setToast(null);
+    try { await patch(e, change); setToast({ text: `${e.name} updated.` }); await load(true); } catch (x) { setToast({ text: message(x), bad: true }); } finally { setBusy(false); }
+  };
+  const bulk = async (change: Partial<EmployeeInput>, label: string) => {
+    const people = all.filter((e) => picked.has(e.id)); let done = 0;
+    setBusy(true); setToast(null);
+    try { for (const e of people) { await patch(e, change); done++; } setToast({ text: `${label}: ${done} people updated.` }); setPicked(new Set()); setBulkTitle(""); }
+    catch (x) { setToast({ text: `${label}: stopped after ${done} of ${people.length}. ${message(x)}`, bad: true }); }
+    finally { await load(true); setBusy(false); }
   };
   const remove = async (e: Employee) => {
     const reports = all.filter((p) => p.reports_to_id === e.id);
     if (!confirm(e.is_active ? `Deactivate ${e.name}? ${reports.length} direct reports will move to ${name(e.reports_to_id)}.` : `Permanently delete ${e.name}? This cannot be undone.`)) return;
-    setBusyId(e.id); setActionError(""); setNotice("");
-    try { await api.remove(e.id, !e.is_active); setNotice(e.is_active ? "Employee deactivated." : "Employee deleted."); await load(); } catch (x) { setActionError(message(x)); } finally { setBusyId(null); }
+    setBusy(true); setToast(null);
+    try { await api.remove(e.id, !e.is_active); setToast({ text: e.is_active ? "Employee deactivated." : "Employee deleted." }); await load(true); } catch (x) { setToast({ text: message(x), bad: true }); } finally { setBusy(false); }
   };
-  return <div className="pad directory"><div className="row between"><div><h1>Employees</h1><p className="muted">Manage departments, job titles and reporting relationships.</p></div><button className="btn primary" disabled={loading || !!error} onClick={() => setEditing({ init: { ...blank, department_id: departments.some((d) => d.is_active && String(d.id) === department) ? Number(department) : null } })}>Add employee</button></div>
+  const deactivatePicked = () => { if (confirm(`Deactivate ${picked.size} people? Their direct reports move up to their managers.`)) void bulk({ is_active: false }, "Deactivate"); };
+  const allShownPicked = shown.length > 0 && shown.every((e) => picked.has(e.id));
+  const togglePage = () => setPicked((p) => { const n = new Set(p); shown.forEach((e) => allShownPicked ? n.delete(e.id) : n.add(e.id)); return n; });
+  const toggleOne = (id: number) => setPicked((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const noManager = below(picked);
+  const activeDepartments = departments.filter((d) => d.is_active);
+  const filtersOn = [department, role, manager].some(Boolean) || board !== "all" || sort !== "order";
+  return <div className="pad directory wide"><div className="row between"><div><h1>Employees</h1><p className="muted">{all.length} people · {setupCount} still need a department or manager. Tip: tick people to set them all at once.</p></div><button className="btn primary" disabled={loading || !!error} onClick={() => setEditing({ init: { ...blank, department_id: departments.some((d) => d.is_active && String(d.id) === department) ? Number(department) : null } })}>Add employee</button></div>
     {error ? <Failure error={error} retry={() => void load()} /> : loading ? <p role="status">Loading employees...</p> : <>
-      <div className="directory-filters">
-        <label className="directory-search">Search<input placeholder="Name, department, designation, or manager" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
-        <label>Status<select value={status} onChange={(e) => setStatus(e.target.value)}><option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
-        <label>Board<select value={board} onChange={(e) => setBoard(e.target.value)}><option value="all">Everyone</option><option value="yes">Board members</option><option value="no">Non-board members</option></select></label>
-        <label>Department<select value={department} onChange={(e) => setDepartment(e.target.value)}><option value="">All departments</option><option value="none">Unassigned</option>{departments.map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></label>
-        <label>Designation / role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="">All designations</option><option value="none">No designation</option>{[...new Set(all.map((e) => e.designation).filter(Boolean))].sort().map((r) => <option key={r} value={r}>{r}</option>)}</select></label>
-        <label>Manager<select value={manager} onChange={(e) => setManager(e.target.value)}><option value="">All managers</option><option value="none">Top of hierarchy</option>{all.filter((e) => all.some((r) => r.reports_to_id === e.id)).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select></label>
-        <label>Sort<select value={sort} onChange={(e) => setSort(e.target.value)}><option value="order">Display order</option><option value="name">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="role">Designation / role</option></select></label>
-      </div>
-      {notice && <p className="notice" role="status">{notice}</p>}{actionError && <p className="err" role="alert">{actionError}</p>}
-      <div className="row between"><p className="muted" role="status">{filtered.length} of {all.length} employees · {all.filter((e) => e.department_id === null).length} unassigned</p><button className="btn" onClick={() => { setQuery(""); setStatus("all"); setBoard("all"); setDepartment(""); setRole(""); setManager(""); setSort("order"); }}>Clear filters</button></div>
-      {shown.length ? <div className="employee-list">{shown.map((e) => <article className="employee-card" key={e.id}>
-        <div className="employee-identity"><Avatar e={e} /><div><h2>{e.name}</h2><p>{e.designation || "No designation"}</p><span className={"status-tag " + (e.is_active ? "active" : "")}>{e.is_active ? "Active" : "Inactive"}{e.is_board_member ? " | Board member" : ""}</span></div></div>
-        <div className="employee-manager">
-          <label>Department<select disabled={busyId !== null} value={e.department_id ?? ""} onChange={(x) => void quickSave(e, { department_id: x.target.value ? Number(x.target.value) : null })}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === e.department_id).map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></label>
-          <label>Reports to<select disabled={busyId !== null} value={e.reports_to_id ?? ""} onChange={(x) => void quickSave(e, { reports_to_id: x.target.value ? Number(x.target.value) : null })}><option value="">None - top of hierarchy</option>{all.filter((m) => m.is_active && m.id !== e.id && !below(e.id).has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></label>
+      <div className="directory-bar">
+        <div className="tabs" role="tablist" aria-label="Employee list">
+          {([["all", `All (${all.length})`], ["setup", `Needs setup (${setupCount})`], ["inactive", `Inactive (${all.filter((e) => !e.is_active).length})`]] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "on" : ""} onClick={() => setTab(key)}>{label}</button>)}
         </div>
-        <div className="actions"><button className="btn" disabled={busyId !== null} onClick={() => setEditing({ id: e.id, init: e })}>Edit<span className="sr-only"> {e.name}</span></button><button className={"btn " + (!e.is_active ? "danger" : "")} disabled={busyId !== null} onClick={() => void remove(e)}>{busyId === e.id ? "Working..." : e.is_active ? "Deactivate" : "Delete"}<span className="sr-only"> {e.name}</span></button></div>
-      </article>)}</div> : <p className="notice">{all.length ? "No employees match these filters." : "No employees yet. Add your first person to get started."}</p>}
-      <div className="pagination"><button className="btn" disabled={current === 1} onClick={() => { setPage(current - 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Previous</button><span>Page {current} of {pages}</span><button className="btn" disabled={current === pages} onClick={() => { setPage(current + 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Next</button></div>
+        <label className="directory-search">Search<input placeholder="Name, designation, department or manager" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
+      </div>
+      <details className="more-filters" open={filtersOn || undefined}><summary>More filters{filtersOn ? " (active)" : ""}</summary>
+        <div className="directory-filters">
+          <label>Department<select value={department} onChange={(e) => setDepartment(e.target.value)}><option value="">All departments</option><option value="none">Unassigned</option>{departments.map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></label>
+          <label>Designation / role<select value={role} onChange={(e) => setRole(e.target.value)}><option value="">All designations</option><option value="none">No designation</option>{titles.map((r) => <option key={r} value={r}>{r}</option>)}</select></label>
+          <label>Manager<select value={manager} onChange={(e) => setManager(e.target.value)}><option value="">All managers</option><option value="none">Top of hierarchy</option>{all.filter((e) => all.some((r) => r.reports_to_id === e.id)).map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select></label>
+          <label>Board<select value={board} onChange={(e) => setBoard(e.target.value)}><option value="all">Everyone</option><option value="yes">Board members</option><option value="no">Non-board members</option></select></label>
+          <label>Sort<select value={sort} onChange={(e) => setSort(e.target.value)}><option value="order">Display order</option><option value="name">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="role">Designation / role</option></select></label>
+          <button className="btn" onClick={() => { setDepartment(""); setRole(""); setManager(""); setBoard("all"); setSort("order"); }}>Clear filters</button>
+        </div>
+      </details>
+      {picked.size > 0 && <div className="bulk-bar" role="region" aria-label="Bulk actions">
+        <b>{picked.size} selected</b>
+        <label>Reports to<select disabled={busy} value="" onChange={(x) => { if (x.target.value !== "") void bulk({ reports_to_id: x.target.value === "top" ? null : Number(x.target.value) }, "Reports to"); }}><option value="">Choose...</option><option value="top">None - top of hierarchy</option>{all.filter((m) => m.is_active && !noManager.has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></label>
+        <label>Department<select disabled={busy} value="" onChange={(x) => { if (x.target.value !== "") void bulk({ department_id: x.target.value === "none" ? null : Number(x.target.value) }, "Department"); }}><option value="">Choose...</option><option value="none">Unassigned</option>{activeDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
+        <label>Designation / role<span className="row"><input list="employee-titles" maxLength={200} disabled={busy} value={bulkTitle} onChange={(x) => setBulkTitle(x.target.value)} placeholder="Pick or type" /><button className="btn" disabled={busy || !bulkTitle.trim()} onClick={() => void bulk({ designation: bulkTitle.trim() }, "Designation")}>Apply</button></span></label>
+        <button className="btn danger" disabled={busy} onClick={deactivatePicked}>Deactivate</button>
+        <button className="btn" disabled={busy} onClick={() => setPicked(new Set())}>Clear</button>
+      </div>}
+      <datalist id="employee-titles">{titles.map((t) => <option key={t} value={t} />)}</datalist>
+      {shown.length ? <div className="table-wrap"><table className="emp-table">
+        <thead><tr><th><input type="checkbox" aria-label="Select everyone on this page" checked={allShownPicked} onChange={togglePage} /></th><th>Name</th><th>Designation / role</th><th>Department</th><th>Reports to</th><th><span className="sr-only">Actions</span></th></tr></thead>
+        <tbody>{shown.map((e) => <tr key={e.id} className={(picked.has(e.id) ? "picked " : "") + (!e.is_active ? "inactive" : "")}>
+          <td><input type="checkbox" aria-label={`Select ${e.name}`} checked={picked.has(e.id)} onChange={() => toggleOne(e.id)} /></td>
+          <td><div className="who"><Avatar e={e} size={32} /><div><b>{e.name}</b>{(e.is_board_member || !e.is_active) && <small>{!e.is_active ? "Inactive" : "Board member"}</small>}</div></div></td>
+          <td><input aria-label={`Designation / role for ${e.name}`} list="employee-titles" maxLength={200} disabled={busy} key={e.id + e.designation} defaultValue={e.designation} placeholder="Pick or type" onBlur={(x) => { const v = x.target.value.trim(); if (v !== e.designation) void quickSave(e, { designation: v }); }} onKeyDown={(x) => { if (x.key === "Enter") x.currentTarget.blur(); else if (x.key === "Escape") { x.currentTarget.value = e.designation; x.currentTarget.blur(); } }} /></td>
+          <td><select aria-label={`Department for ${e.name}`} disabled={busy} value={e.department_id ?? ""} onChange={(x) => void quickSave(e, { department_id: x.target.value ? Number(x.target.value) : null })}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === e.department_id).map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></td>
+          <td><select aria-label={`Reports to for ${e.name}`} disabled={busy} value={e.reports_to_id ?? ""} onChange={(x) => void quickSave(e, { reports_to_id: x.target.value ? Number(x.target.value) : null })}><option value="">None - top of hierarchy</option>{all.filter((m) => m.is_active && m.id !== e.id && !below([e.id]).has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></td>
+          <td className="actions"><button className="btn" disabled={busy} onClick={() => setEditing({ id: e.id, init: e })}>Edit<span className="sr-only"> {e.name}</span></button><button className={"btn " + (!e.is_active ? "danger" : "")} disabled={busy} onClick={() => void remove(e)}>{e.is_active ? "Deactivate" : "Delete"}<span className="sr-only"> {e.name}</span></button></td>
+        </tr>)}</tbody>
+      </table></div> : <p className="notice">{all.length ? (tab === "setup" ? "Everyone is set up." : "No employees match these filters.") : "No employees yet. Add your first person to get started."}</p>}
+      <div className="pagination"><button className="btn" disabled={current === 1} onClick={() => { setPage(current - 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Previous</button><span>{filtered.length} shown · Page {current} of {pages}</span><button className="btn" disabled={current === pages} onClick={() => { setPage(current + 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Next</button></div>
     </>}
-    {editing && <EmployeeForm initial={editing.init} id={editing.id} all={all} departments={departments} onDone={(saved) => { setEditing(null); if (saved) { setNotice("Employee saved."); void load(); } }} />}
+    {toast && <div className={"toast" + (toast.bad ? " bad" : "")} role={toast.bad ? "alert" : "status"}>{toast.text}{toast.bad && <button className="btn" onClick={() => setToast(null)}>Dismiss</button>}</div>}
+    {editing && <EmployeeForm initial={editing.init} id={editing.id} all={all} departments={departments} onDone={(saved) => { setEditing(null); if (saved) { setToast({ text: "Employee saved." }); void load(true); } }} />}
   </div>;
 }
 function CompanySettings({ onSaved }: { onSaved: () => void }) {

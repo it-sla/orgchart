@@ -191,8 +191,12 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
             regular, bold = "OrgRegular", "OrgBold"
             break
     people = {str(e["id"]): e for e in data["nodes"]}
-    boxes = {key: (p["x"], p["y"], 156 if mode == "radial" else 240,
-                   160 if mode == "radial" else 100) for key, p in positions.items() if key in people}
+    card_h = 160 if mode == "radial" else 76 if mode == "tree" else 100
+    boxes = {key: (p["x"], p["y"], 156 if mode == "radial" else 240, card_h) for key, p in positions.items() if key in people}
+    if "group" in positions:
+        loose_keys = [k for k in boxes if k not in {str(e["source"]) for e in data["edges"]} | {str(e["target"]) for e in data["edges"]}]
+        gx, gy = positions["group"]["x"], positions["group"]["y"]
+        boxes["group"] = (gx, gy, max([boxes[k][0] + 240 - gx for k in loose_keys] or [240]), 44)
     if mode == "radial":
         p = positions["company"]
         boxes["company"] = (p["x"], p["y"], 144, 144)
@@ -281,8 +285,11 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
         elif mode == 'compact':
             line([(a[0], a[1]+50), (a[0]-24, a[1]+50), (a[0]-24, b[1]+50), (b[0], b[1]+50)])
         else:
-            middle = (a[1]+100+b[1])/2
-            line([(a[0]+120, a[1]+100), (a[0]+120, middle), (b[0]+120, middle), (b[0]+120, b[1])])
+            if positions[str(edge['target'])].get('stacked'):
+                line([(a[0]+12, a[1]+card_h), (a[0]+12, b[1]+card_h/2), (b[0], b[1]+card_h/2)])
+                continue
+            middle = (a[1]+card_h+b[1])/2
+            line([(a[0]+120, a[1]+card_h), (a[0]+120, middle), (b[0]+120, middle), (b[0]+120, b[1])])
     if mode == 'radial':
         managed = {str(e['target']) for e in data['edges']}
         for key in people:
@@ -307,11 +314,19 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
             text(e['designation'] or 'Team member',px,py,144,regular,10,ink,True)
             if e.get('is_board_member'):
                 px,py=xy(x+4,y+155); text('Board member',px,py,148,size=9,color='#526479',center=True)
+        elif mode == 'tree':
+            rect(x,y,240,card_h,'#ffffff','#d8e1ea',12)
+            avatar(e,x+14,y+18,40)
+            px,py=xy(x+64,y+30); text(e['name'],px,py,162,bold,13,max_lines=1)
+            px,py=xy(x+64,y+50); text(e['designation'] or 'Team member',px,py,162,size=11,color='#526479',max_lines=1)
         else:
             rect(x,y,240,100,'#ffffff','#d8e1ea',12)
             avatar(e,x+16,y+23,44)
             px,py=xy(x+72,y+31); text(e['name'],px,py,152,bold,14)
             px,py=xy(x+72,y+64); text(e['designation'] or 'Team member',px,py,152,size=12,color='#526479')
+    if 'group' in boxes:
+        x,y,w,h = boxes['group']; rect(x,y,w,h,'#f1f5f9','#94a3b8',10)
+        px,py = xy(x+16,y+27); text(positions['group'].get('label') or 'Not yet placed',px,py,w-32,bold,13,'#334155',max_lines=1)
     if mode != 'radial' and data['board']:
         x,y,w,h=boxes['board']; rect(x,y,w,h,'#eef3fa','#c9d7e7',12)
         px,py=xy(x+12,y+25); text('Board of Directors',px,py,216,bold,13)

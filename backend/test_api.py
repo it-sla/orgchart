@@ -213,3 +213,17 @@ def test_department_crud_delete_protects_all_employee_memberships():
     assert c.get(f"/api/employees/{active}").status_code == 200
     assert c.get(f"/api/employees/{inactive}").status_code == 200
     assert c.post("/api/departments", json={"name": "CRUD department"}).status_code == 201
+
+
+def test_tree_pdf_with_stacked_team_and_group():
+    boss = mk("stack boss")
+    kids = [mk(f"stack kid {i}", boss) for i in range(3)]
+    loose = mk("loose person")
+    positions = [{"id": str(boss), "x": 0, "y": 0}, {"id": "group", "x": 0, "y": 400, "label": "Not yet placed (1)"},
+                 {"id": str(loose), "x": 0, "y": 456}, {"id": "board", "x": 0, "y": -200}]
+    positions += [{"id": str(k), "x": 24, "y": 96 + i * 86, "stacked": True} for i, k in enumerate(kids)]
+    body = {"scope": "visible", "ids": [boss, loose, *kids], "layout": "tree", "positions": positions, "paper": "chart"}
+    response = c.post("/api/export/pdf", json=body)
+    assert response.status_code == 200, response.text
+    text = " ".join(PdfReader(io.BytesIO(response.content)).pages[0].extract_text().split())
+    assert "Not yet placed (1)" in text and "stack kid 2" in text and "loose person" in text

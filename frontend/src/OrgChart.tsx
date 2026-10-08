@@ -14,7 +14,7 @@ import {
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, imgUrl, type Employee, type OrgChartData } from "./api";
 import { PORTRAIT_W, PORTRAIT_H, COMPANY_SIZE } from "./radialLayout";
-import { buildLayout, type LayoutMode } from "./chartLayout";
+import { buildLayout, GROUP_ID, TREE_H, unplacedIds, type LayoutMode } from "./chartLayout";
 
 const W = 240, H = 100;
 
@@ -32,14 +32,14 @@ export function Avatar({ e, size = 44 }: { e: { name: string; photo_path: string
 }
 
 
-type Ctx = { select: (id: number) => void; toggle: (id: number) => void; selected: number | null; collapsed: Set<number>; compact: boolean };
+type Ctx = { select: (id: number) => void; toggle: (id: number) => void; selected: number | null; collapsed: Set<number>; compact: boolean; tree: boolean };
 const ChartCtx = createContext<Ctx>(null!);
 
 function EmpNode({ data }: NodeProps<Node<{ e: Employee; kids: number }>>) {
-  const { select, toggle, selected, collapsed, compact } = useContext(ChartCtx);
+  const { select, toggle, selected, collapsed, compact, tree } = useContext(ChartCtx);
   const { e, kids } = data;
   return (
-    <div className={"emp-node" + (selected === e.id ? " sel" : "")} >
+    <div className={"emp-node" + (tree ? " tree" : "") + (selected === e.id ? " sel" : "")} >
       <button className="node-select" aria-label={`View ${e.name}, ${e.designation}`} onClick={() => select(e.id)} />
       <Handle type="target" position={compact ? Position.Left : Position.Top} isConnectable={false} />
       <Avatar e={e} />
@@ -61,6 +61,13 @@ function EmpNode({ data }: NodeProps<Node<{ e: Employee; kids: number }>>) {
       <Handle type="source" position={compact ? Position.Left : Position.Bottom} isConnectable={false} />
     </div>
   );
+}
+
+function GroupNode({ data }: NodeProps<Node<{ label: string; closed: boolean }>>) {
+  const { toggle } = useContext(ChartCtx);
+  return <button className="group-node" aria-expanded={!data.closed} onClick={() => toggle(GROUP_ID)}>
+    <b>{data.label}</b><span>{data.closed ? "+ Show" : "- Hide"}</span>
+  </button>;
 }
 
 function BoardNode({ data }: NodeProps<Node<{ members: Employee[] }>>) {
@@ -104,11 +111,15 @@ function CompanyNode({ data }: NodeProps<Node<{ company: OrgChartData["company"]
   </div>;
 }
 
-const nodeTypes = { emp: EmpNode, board: BoardNode, portrait: PortraitNode, company: CompanyNode };
+const nodeTypes = { emp: EmpNode, group: GroupNode, board: BoardNode, portrait: PortraitNode, company: CompanyNode };
 
 function CompactEdge(props: EdgeProps) {
   const rail = props.sourceX - 24;
   return <BaseEdge {...props} path={`M ${props.sourceX},${props.sourceY} H ${rail} V ${props.targetY} H ${props.targetX}`} />;
+}
+// Stacked team: a rail down the left of the column with a stub into each card.
+function RailEdge(props: EdgeProps) {
+  return <BaseEdge {...props} path={`M ${props.sourceX - W / 2 + 12},${props.sourceY} V ${props.targetY + TREE_H / 2} H ${props.targetX - W / 2}`} />;
 }
 function RadialEdge(props: EdgeProps) {
   const d = props.data as { from: { x: number; y: number }; to: { x: number; y: number }; company?: boolean };
@@ -117,7 +128,7 @@ function RadialEdge(props: EdgeProps) {
   const start = d.company ? COMPANY_SIZE / 2 : 42, end = 42;
   return <BaseEdge id={props.id} style={props.style} path={`M ${d.from.x + dx / length * start},${d.from.y + dy / length * start} L ${d.to.x - dx / length * end},${d.to.y - dy / length * end}`} />;
 }
-const edgeTypes = { compact: CompactEdge, radial: RadialEdge };
+const edgeTypes = { compact: CompactEdge, radial: RadialEdge, rail: RailEdge };
 
 
 function Panel({ id, select, onClose }: { id: number; select: (id: number) => void; onClose: () => void }) {
@@ -159,12 +170,14 @@ function Panel({ id, select, onClose }: { id: number; select: (id: number) => vo
 
 function Chart({ data }: { data: OrgChartData }) {
   // Start with leaders and their direct teams; deeper branches open on demand.
-  const collapseAll = () => new Set(data.edges.map((e) => e.source));
+  const loose = useMemo(() => new Set(unplacedIds(data)), [data]);
+  const collapseAll = () => new Set([...data.edges.map((e) => e.source), ...(loose.size ? [GROUP_ID] : [])]);
   const [collapsed, setCollapsed] = useState<Set<number>>(() => {
     if (data.nodes.length <= 20) return new Set();
+    const closedGroup = loose.size > 8 ? [GROUP_ID] : [];
     const parent = new Map(data.edges.map((e) => [e.target, e.source]));
     const depth = (id: number) => { let level = 0; const seen = new Set<number>(); for (let p = parent.get(id); p !== undefined && !seen.has(p); p = parent.get(p)) { seen.add(p); level++; } return level; };
-    return new Set([...collapseAll()].filter((id) => depth(id) >= 2));
+    return new Set([...[...collapseAll()].filter((id) => id !== GROUP_ID && depth(id) >= 2), ...closedGroup]);
   });
   const [mode, setMode] = useState<LayoutMode>("radial");
   const compact = mode === "compact";
@@ -203,6 +216,7 @@ function Chart({ data }: { data: OrgChartData }) {
     const parent = new Map(data.edges.map((e) => [e.target, e.source]));
     const next = new Set(collapsed);
     for (let p = parent.get(id); p !== undefined; p = parent.get(p)) next.delete(p);
+    if (loose.has(id)) next.delete(GROUP_ID);
     setCollapsed(next);
     setSelected(id);
     setQuery("");
@@ -221,7 +235,7 @@ function Chart({ data }: { data: OrgChartData }) {
     try {
       const exportLayout = scope === "full" ? buildLayout(data, new Set(), mode) : layout;
       const ids = exportLayout.nodes.filter((n) => n.type === "emp" || n.type === "portrait").map((n) => Number(n.id));
-      const positions = exportLayout.nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y, depth: Number(n.data.depth ?? 0) }));
+      const positions = exportLayout.nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y, depth: Number(n.data.depth ?? 0), stacked: Boolean(n.data.stacked), label: String(n.data.label ?? "") }));
       const blob = await api.exportPdf({ scope, ids, paper, orientation, layout: mode, positions });
       const url = URL.createObjectURL(blob);
       const name = `${data.company.company_name.replace(/[\\/:*?"<>|]/g, "-")} - ${mode} - ${scope === "full" ? "Full organization" : "Current view"}.pdf`;
@@ -232,7 +246,7 @@ function Chart({ data }: { data: OrgChartData }) {
   };
 
   return (
-    <ChartCtx.Provider value={{ select, toggle, selected, collapsed, compact }}>
+    <ChartCtx.Provider value={{ select, toggle, selected, collapsed, compact, tree: mode === "tree" }}>
       <div className={`chart-page ${mode === "radial" ? "radial-chart" : ""}`}>
         <div className="chart-toolbar">
           <div className="chart-heading"><h1>Organization chart</h1><p>{people.length} people | Select a person to see their reporting relationships</p></div>
