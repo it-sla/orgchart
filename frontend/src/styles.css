@@ -288,4 +288,9 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .company-switch select { min-height: 36px; max-width: 260px; padding: 4px 28px 4px 8px; border: 1px solid transparent; border-radius: 8px; background-color: transparent; font: inherit; font-weight: 700; color: inherit; cursor: pointer; }
 .company-switch select:hover, .company-switch select:focus-visible { border-color: #cbd5e1; background-color: #f8fafc; }
 
-.board-rank{width:3.5rem;margin-left:.4rem}
+.board-order{margin:12px 0;border:1px solid #d1d5db;border-radius:8px;padding:8px 12px;background:#fff}
+.board-order summary{cursor:pointer;font-weight:600}
+.board-order ol{list-style:none;margin:8px 0 0;padding:0}
+.board-order li{display:flex;align-items:center;gap:10px;padding:4px 0}
+.board-order li b{min-width:12rem}.board-order li .muted{flex:1}
+.board-order .rank{width:1.6rem;height:1.6rem;border-radius:50%;background:#dbeafe;color:#1d4ed8;display:grid;place-items:center;font-size:12px}

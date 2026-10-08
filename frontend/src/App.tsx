@@ -60,7 +60,7 @@ function EmployeeForm({ initial, id, all, departments, onDone }: { initial: Empl
       <label>Reports to<select value={f.reports_to_id ?? ""} onChange={(e) => set("reports_to_id", e.target.value ? Number(e.target.value) : null)}><option value="">None - top of hierarchy</option>{all.filter((e) => e.is_active && !forbidden.has(e.id)).map((e) => <option key={e.id} value={e.id}>{e.name} - {e.designation}</option>)}</select></label>
       <label className="check"><input type="checkbox" checked={f.is_board_member} onChange={(e) => set("is_board_member", e.target.checked)} /> Board member</label>
       <details className="advanced"><summary>Advanced</summary>
-      <div className="row"><label>Board order<input type="number" value={f.board_order} onChange={(e) => set("board_order", Number(e.target.value))} /></label><label>Display order<input type="number" value={f.display_order} onChange={(e) => set("display_order", Number(e.target.value))} /></label></div>
+      <div className="row"><label>Display order<input type="number" value={f.display_order} onChange={(e) => set("display_order", Number(e.target.value))} /></label></div>
       </details>
       <label className="check"><input type="checkbox" checked={f.is_active} onChange={(e) => set("is_active", e.target.checked)} /> Active</label>
       {!f.is_active && initial.is_active && <p className="notice">Direct reports will move to this employee's manager when you save.</p>}
@@ -108,6 +108,12 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
     setBusy(true); setToast(null);
     try { await patch(e, change); setToast({ text: `${e.name} updated.` }); await load(true); } catch (x) { setToast({ text: message(x), bad: true }); } finally { setBusy(false); }
   };
+  const boardList = all.filter((e) => e.is_active && e.is_board_member).sort((a, b) => a.board_order - b.board_order || a.name.localeCompare(b.name));
+  const moveBoard = async (i: number, d: number) => {
+    const order = [...boardList]; [order[i], order[i + d]] = [order[i + d], order[i]];
+    setBusy(true); setToast(null);
+    try { for (const [k, p] of order.entries()) if (p.board_order !== k + 1) await patch(p, { board_order: k + 1 }); await load(true); } catch (x) { setToast({ text: message(x), bad: true }); } finally { setBusy(false); }
+  };
   const bulk = async (change: Partial<EmployeeInput>, label: string) => {
     const people = all.filter((e) => picked.has(e.id)); let done = 0;
     setBusy(true); setToast(null);
@@ -130,6 +136,7 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
   const filtersOn = [department, role, manager].some(Boolean) || board !== "all" || sort !== "order";
   return <div className="pad directory wide"><div className="row between"><div><h1>Employees</h1><p className="muted">{all.length} people · {setupCount} still need a department or manager. Tip: tick people to set them all at once.</p></div><button className="btn primary" disabled={loading || !!error} onClick={() => setEditing({ init: { ...blank, department_id: departments.some((d) => d.is_active && String(d.id) === department) ? Number(department) : null } })}>Add employee</button></div>
     {error ? <Failure error={error} retry={() => void load()} /> : loading ? <p role="status">Loading employees...</p> : <>
+      {boardList.length > 1 && <details className="board-order" open><summary>Board of Directors order ({boardList.length})</summary><p className="muted">Top of this list is shown first in the chart. Use the arrows to move someone.</p><ol>{boardList.map((p, i) => <li key={p.id}><span className="rank">{i + 1}</span><b>{p.name}</b><span className="muted">{p.designation}</span><button className="btn" disabled={busy || i === 0} aria-label={`Move ${p.name} up`} onClick={() => void moveBoard(i, -1)}>↑</button><button className="btn" disabled={busy || i === boardList.length - 1} aria-label={`Move ${p.name} down`} onClick={() => void moveBoard(i, 1)}>↓</button></li>)}</ol></details>}
       <div className="directory-bar">
         <div className="tabs" role="tablist" aria-label="Employee list">
           {([["all", `All (${all.length})`], ["setup", `Needs setup (${setupCount})`], ["inactive", `Inactive (${all.filter((e) => !e.is_active).length})`]] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "on" : ""} onClick={() => setTab(key)}>{label}</button>)}
@@ -163,7 +170,7 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
           <td><input aria-label={`Designation / role for ${e.name}`} list="employee-titles" maxLength={200} disabled={busy} key={e.id + e.designation} defaultValue={e.designation} placeholder="Pick or type" onBlur={(x) => { const v = x.target.value.trim(); if (v !== e.designation) void quickSave(e, { designation: v }); }} onKeyDown={(x) => { if (x.key === "Enter") x.currentTarget.blur(); else if (x.key === "Escape") { x.currentTarget.value = e.designation; x.currentTarget.blur(); } }} /></td>
           <td><select aria-label={`Department for ${e.name}`} disabled={busy} value={e.department_id ?? ""} onChange={(x) => void quickSave(e, { department_id: x.target.value ? Number(x.target.value) : null })}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === e.department_id).map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></td>
           <td><select aria-label={`Reports to for ${e.name}`} disabled={busy} value={e.reports_to_id ?? ""} onChange={(x) => void quickSave(e, { reports_to_id: x.target.value ? Number(x.target.value) : null })}><option value="">None - top of hierarchy</option>{all.filter((m) => m.is_active && m.id !== e.id && !below([e.id]).has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></td>
-          <td className="board-cell"><input type="checkbox" aria-label={`${e.name} is a board member`} disabled={busy} checked={e.is_board_member} onChange={(x) => void quickSave(e, { is_board_member: x.target.checked })} />{e.is_board_member && <input type="number" min={0} className="board-rank" title="Board rank (lowest first)" aria-label={`Board rank for ${e.name}`} disabled={busy} defaultValue={e.board_order} onBlur={(x) => { const n = Number(x.target.value); if (n !== e.board_order) void quickSave(e, { board_order: n }); }} />}</td>
+          <td className="board-cell"><input type="checkbox" aria-label={`${e.name} is a board member`} disabled={busy} checked={e.is_board_member} onChange={(x) => void quickSave(e, { is_board_member: x.target.checked })} /></td>
           <td className="actions"><button className="btn" disabled={busy} onClick={() => setEditing({ id: e.id, init: e })}>Edit<span className="sr-only"> {e.name}</span></button><button className={"btn " + (!e.is_active ? "danger" : "")} disabled={busy} onClick={() => void remove(e)}>{e.is_active ? "Deactivate" : "Delete"}<span className="sr-only"> {e.name}</span></button></td>
         </tr>)}</tbody>
       </table></div> : <p className="notice">{all.length ? (tab === "setup" ? "Everyone is set up." : "No employees match these filters.") : "No employees yet. Add your first person to get started."}</p>}
