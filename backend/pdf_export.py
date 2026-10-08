@@ -231,7 +231,15 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
                 c.drawCentredString(x + w / 2, y - i * size * 1.25, line)
             else:
                 c.drawString(x, y - i * size * 1.25, line)
-    text(data["company"]["company_name"], 36, height - 32, width - 72, bold, 16)
+    logo = uploads / Path(data["company"].get("logo_path") or "missing").name
+    tx = 36
+    if logo.is_file():
+        try:
+            c.drawImage(ImageReader(str(logo)), 36, height - 60, 40, 40, preserveAspectRatio=True, anchor="sw", mask="auto")
+            tx = 86
+        except Exception:
+            pass
+    text(data["company"]["company_name"], tx, height - 32, width - tx - 36, bold, 16)
     text(f'{mode.title()} layout | {"Full organization" if scope == "full" else "Currently displayed people"} | {len(people)} people', 36, height - 64, width - 72, size=10)
     text('Reporting lines' + (' | Dashed lines connect the company to leaders' if mode == 'radial' else ''), 36, 22, width - 72, size=9, color="#526479")
     c.saveState()
