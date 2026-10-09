@@ -25,8 +25,7 @@ function addBoard(nodes: Node[], d: OrgChartData) {
 }
 
 /** Tree: leaf-only teams stack in one column under their manager; loose people sit in one grid below. */
-function buildTree(d: OrgChartData, collapsed: Set<number>, visible: Set<number>, kidsOf: Map<number, number[]>) {
-  const loose = new Set(unplacedIds(d));
+function buildTree(d: OrgChartData, loose: Set<number>, collapsed: Set<number>, visible: Set<number>, kidsOf: Map<number, number[]>) {
   const isLeaf = (id: number) => !kidsOf.get(id)?.length;
   const vis = d.nodes.filter((n) => visible.has(n.id) && !loose.has(n.id));
   const stackOf = new Map<number, number[]>();
@@ -48,8 +47,9 @@ function buildTree(d: OrgChartData, collapsed: Set<number>, visible: Set<number>
   const rankTop = new Map<number, number>();
   vis.filter((n) => !stacked.has(n.id)).forEach((n) => { const p = g.node(String(n.id)); rankTop.set(p.y, Math.min(rankTop.get(p.y) ?? Infinity, p.y - size(n.id).height / 2)); });
   vis.filter((n) => !stacked.has(n.id)).forEach((n) => {
-    const p = g.node(String(n.id)), { width } = size(n.id);
-    const x = p.x - width / 2, y = rankTop.get(p.y)!;
+    const p = g.node(String(n.id));
+    // Centre the card (not the wider stacked-team box) so parent/child lines stay straight.
+    const x = p.x - W / 2, y = rankTop.get(p.y)!;
     nodes.push({ id: String(n.id), type: "emp", position: { x, y }, data: { e: n, kids: kidsOf.get(n.id)?.length ?? 0 } });
     stackOf.get(n.id)?.forEach((id, i) => nodes.push({ id: String(id), type: "emp", position: { x: x + STACK_X, y: y + TREE_H + STACK_TOP + i * STEP }, data: { e: byId.get(id)!, kids: 0, stacked: true } }));
   });
@@ -73,6 +73,9 @@ export function buildLayout(full: OrgChartData, collapsed: Set<number>, mode: La
   const mgr = new Set(full.edges.map((e) => e.target));
   const top = new Set(full.nodes.filter((n) => n.is_board_member && !mgr.has(n.id)).map((n) => n.id));
   const d = { ...full, nodes: full.nodes.filter((n) => !top.has(n.id)), edges: full.edges.filter((e) => !top.has(e.source)) };
+  // Their direct reports are chart roots, joined to the board box by a reporting line.
+  const boardKids = full.edges.filter((e) => top.has(e.source)).map((e) => e.target);
+  const boardEdges = (visible: Set<number>, type: string): Edge[] => d.board.length ? boardKids.filter((id) => visible.has(id)).map((id) => ({ id: `board-${id}`, source: "board", target: String(id), type, style: { stroke: "#a6b8c9", strokeWidth: 1.5 } })) : [];
   const compact = mode === "compact";
   const kidsOf = new Map<number, number[]>();
   d.edges.forEach((e) => kidsOf.set(e.source, [...(kidsOf.get(e.source) ?? []), e.target]));
@@ -93,10 +96,18 @@ export function buildLayout(full: OrgChartData, collapsed: Set<number>, mode: La
     nodes.push({ id: "company", type: "company", position: { x: -COMPANY_SIZE / 2, y: -COMPANY_SIZE / 2 }, width: COMPANY_SIZE, height: COMPANY_SIZE, data: { company: d.company }, selectable: false });
     const edges: Edge[] = d.edges.filter((e) => visible.has(e.source) && visible.has(e.target)).map((e) => ({ id: `${e.source}-${e.target}`, source: String(e.source), target: String(e.target), type: "radial", data: { from: center(e.source), to: center(e.target) }, style: { stroke: "#a9b2bb", strokeWidth: 1 } }));
     roots.forEach((e) => edges.push({ id: `company-${e.id}`, source: "company", target: String(e.id), type: "radial", data: { from: { x: 0, y: 0 }, to: center(e.id), company: true }, style: { stroke: "#a9b2bb", strokeWidth: 1, strokeDasharray: "5 5" } }));
+    if (d.board.length) {
+      const bh = 44 + d.board.length * 68;
+      nodes.push({ id: "board", type: "board", draggable: false, selectable: false, width: W, height: bh, position: { x: -W / 2, y: Math.min(0, ...nodes.map((n) => n.position.y)) - bh - GAP }, data: { members: d.board }, style: { width: W } });
+      edges.push(...boardEdges(visible, "straight"));
+    }
     return { nodes, edges };
   }
 
-  if (mode === "tree") return buildTree(d, collapsed, visible, kidsOf);
+  if (mode === "tree") {
+    const tree = buildTree(d, new Set(unplacedIds(full)), collapsed, visible, kidsOf);
+    return { nodes: tree.nodes, edges: [...tree.edges, ...boardEdges(visible, "smoothstep")] };
+  }
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 90 });
@@ -124,6 +135,6 @@ export function buildLayout(full: OrgChartData, collapsed: Set<number>, mode: La
   }
   addBoard(nodes, d);
   const flowEdges: Edge[] = edges.map((e) => ({ id: `${e.source}-${e.target}`, source: String(e.source), target: String(e.target), type: compact ? "compact" : "smoothstep", style: { stroke: "#a6b8c9", strokeWidth: 1.5 } }));
-  return { nodes, edges: flowEdges };
+  return { nodes, edges: [...flowEdges, ...boardEdges(visible, compact ? "compact" : "smoothstep")] };
 }
 

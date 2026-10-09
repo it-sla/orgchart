@@ -71,15 +71,16 @@ function GroupNode({ data }: NodeProps<Node<{ label: string; closed: boolean }>>
 }
 
 function BoardNode({ data }: NodeProps<Node<{ members: Employee[] }>>) {
-  const { select, selected } = useContext(ChartCtx);
+  const { select, selected, compact } = useContext(ChartCtx);
   return (
     <div className="board-node">
+      <Handle type="source" position={compact ? Position.Left : Position.Bottom} isConnectable={false} />
       <div className="board-title">Board of Directors</div>
       <div className="board-members">
         {data.members.map((m) => (
           <button key={m.id} className={"bm" + (selected === m.id ? " sel" : "")} onClick={() => select(m.id)}>
             <Avatar e={m} size={32} />
-            <div><b>{m.name}</b><span>{m.designation}</span></div>
+            <div><b title={m.name}>{m.name}</b><span title={m.designation}>{m.designation}</span></div>
           </button>
         ))}
       </div>
@@ -128,7 +129,7 @@ function RadialEdge(props: EdgeProps) {
   const start = d.company ? COMPANY_SIZE / 2 : 42, end = 42;
   return <BaseEdge id={props.id} style={props.style} path={`M ${d.from.x + dx / length * start},${d.from.y + dy / length * start} L ${d.to.x - dx / length * end},${d.to.y - dy / length * end}`} />;
 }
-const edgeTypes = { compact: CompactEdge, radial: RadialEdge, rail: RailEdge };
+export const edgeTypes = { compact: CompactEdge, radial: RadialEdge, rail: RailEdge };
 
 
 function Panel({ id, select, onClose }: { id: number; select: (id: number) => void; onClose: () => void }) {
@@ -201,8 +202,7 @@ function Chart({ data }: { data: OrgChartData }) {
   const matches = query.trim() ? people.filter((e) => `${e.name} ${e.designation}`.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 8) : [];
   useEffect(() => {
     if (mode !== "compact") {
-      const narrow = (document.querySelector(".chart-wrap")?.clientWidth ?? window.innerWidth) < 700;
-      void fitView({ nodes: layoutRef.current.nodes, padding: .15, minZoom: mode === "radial" && narrow ? .65 : .1, maxZoom: 1 });
+      void fitView({ nodes: layoutRef.current.nodes, padding: .15, minZoom: .1, maxZoom: 1 });
       return;
     }
     const board = layoutRef.current.nodes.find((n) => n.id === "board");
@@ -215,7 +215,8 @@ function Chart({ data }: { data: OrgChartData }) {
     // expand any collapsed ancestors so the node is visible
     const parent = new Map(data.edges.map((e) => [e.target, e.source]));
     const next = new Set(collapsed);
-    for (let p = parent.get(id); p !== undefined; p = parent.get(p)) next.delete(p);
+    // The seen set stops a (server-prevented, but defensive) reporting cycle from looping forever.
+    for (let p = parent.get(id), seen = new Set<number>(); p !== undefined && !seen.has(p); p = parent.get(p)) { seen.add(p); next.delete(p); }
     if (loose.has(id)) next.delete(GROUP_ID);
     setCollapsed(next);
     setSelected(id);
@@ -248,8 +249,8 @@ function Chart({ data }: { data: OrgChartData }) {
   return (
     <ChartCtx.Provider value={{ select, toggle, selected, collapsed, compact, tree: mode === "tree" }}>
       <div className={`chart-page ${mode === "radial" ? "radial-chart" : ""}`}>
-        <div className="chart-toolbar">
-          <div className="chart-heading"><h1>Organization chart</h1><p>{people.length} people | Select a person to see their reporting relationships</p></div>
+        <div className="chart-toolbar glass3d">
+          <div className="chart-heading"><h1>Organization chart</h1><p>{people.length} people</p></div>
           <div className="chart-actions">
             <details className="export-options"><summary className="btn primary">Export PDF</summary><div className="export-menu">
               <label>Include<select value={scope} onChange={(e) => setScope(e.target.value as "full" | "visible")} disabled={exporting}><option value="full">Full organization ({data.nodes.length} people)</option><option value="visible">Currently displayed people ({layout.nodes.filter((n) => n.type === "emp" || n.type === "portrait").length})</option></select></label>
@@ -264,13 +265,13 @@ function Chart({ data }: { data: OrgChartData }) {
           </div>
           <div className="chart-tools">
             <div className="people-search">
-              <input aria-label="Find a person" placeholder="Find a person or role..." value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }} />
+              <input aria-label="Find a person" placeholder="Find a person or role (select one to see their reporting lines)" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") setQuery(""); }} />
               {query.trim() && <div className="search-results">{matches.length ? matches.map((e) => <button key={e.id} onClick={() => select(e.id)}><b>{e.name}</b><span>{e.designation}</span></button>) : <p>No people found</p>}</div>}
             </div>
             <div className="layout-switch" aria-label="Chart layout"><button disabled={exporting} aria-pressed={mode === "radial"} onClick={() => setMode("radial")}>Radial</button><button disabled={exporting} aria-pressed={compact} onClick={() => setMode("compact")}>Compact</button><button disabled={exporting} aria-pressed={mode === "tree"} onClick={() => setMode("tree")}>Tree</button></div>
-            <button className="btn" onClick={() => setCollapsed(new Set())}>Expand all</button>
+            <div className="chart-view-tools"><button className="btn" onClick={() => setCollapsed(new Set())}>Expand all</button>
             <button className="btn" onClick={() => setCollapsed(collapseAll())}>Collapse all</button>
-            <button className="btn" onClick={() => fitView({ padding: .15, duration: 250 })}>Fit chart</button>
+            <button className="btn" onClick={() => fitView({ padding: .15, minZoom: .1, duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250 })}>Fit chart</button></div>
           </div>
         </div>
       <div className="chart-wrap">
