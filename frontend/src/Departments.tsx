@@ -68,7 +68,7 @@ export default function Departments({ onViewEmployees }: { onViewEmployees: (id:
   };
   const visible = departments.filter((d) => (showArchived || d.is_active) && `${d.name} ${d.description}`.toLowerCase().includes(query.trim().toLowerCase()));
   return <div className="pad departments-page">
-    <div className="row between"><div><h1>Departments</h1><p className="muted">Organize your people into departments. Job designations stay on each employee.</p></div><span className="status-tag active">{departments.filter((d) => d.is_active).length} active departments</span></div>
+    <div className="page-heading row between"><div><h1>Departments</h1><p className="muted">Organize your people into departments. Job designations stay on each employee.</p></div><span className="status-tag active">{departments.filter((d) => d.is_active).length} active departments</span></div>
     {loadError ? <div className="notice error" role="alert"><p>{loadError}</p><button className="btn" onClick={() => void load()}>Retry</button></div> : loading ? <p role="status">Loading departments...</p> : <>
       {notice && <p className="notice" role="status">{notice}</p>}
       <div className="department-workspace">
@@ -77,7 +77,7 @@ export default function Departments({ onViewEmployees }: { onViewEmployees: (id:
           <fieldset disabled={busy || deleting !== null} className="form-fields">
             <label>Department name<input ref={nameInput} required maxLength={100} value={form.name} onChange={(e) => { setForm({ ...form, name: e.target.value }); setError(""); }} placeholder="e.g. Operations" aria-invalid={!!error} aria-describedby="department-name-help" /></label>
             <small id="department-name-help">Use a unique name. Renaming keeps employee assignments.</small>
-            <label>Description <span className="muted">(optional)</span><textarea maxLength={500} rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does this department do?" /></label>
+            <label><span>Description <span className="muted">(optional)</span></span><textarea maxLength={500} rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does this department do?" /></label>
           </fieldset>
           {error && <p className="err" role="alert">{error}</p>}
           <div className="row"><button className="btn primary" disabled={busy || deleting !== null}>{busy ? "Working..." : editing === null ? "Create department" : "Save department"}</button>{editing !== null && <button className="btn" type="button" disabled={busy || deleting !== null} onClick={reset}>Cancel edit</button>}</div>

@@ -1,34 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, currentCompany, selectCompany, imgUrl, type CompanyInfo, type Employee, type EmployeeInput, type Department, type Settings } from "./api";
+import { api, currentCompany, selectCompany, imgUrl, onUnauthorized, setCsrf, type CompanyInfo, type Employee, type EmployeeInput, type Department, type Me, type Settings } from "./api";
 import OrgChart, { Avatar } from "./OrgChart";
 import Departments from "./Departments";
+import PhotoEditor from "./PhotoEditor";
 
 const blank: EmployeeInput = { name: "", designation: "", department_id: null, photo_path: null, reports_to_id: null, is_board_member: false, board_order: 0, display_order: 0, is_active: true };
 const message = (e: unknown) => e instanceof Error ? e.message : "Something went wrong. Please try again.";
 function Failure({ error, retry }: { error: string; retry: () => void }) {
   return <div className="notice error" role="alert"><p>{error}</p><button className="btn" onClick={retry}>Retry</button></div>;
 }
-function useFilePreview(file: File | null) {
-  const [url, setUrl] = useState<string>();
-  useEffect(() => { if (!file) { setUrl(undefined); return; } const value = URL.createObjectURL(file); setUrl(value); return () => URL.revokeObjectURL(value); }, [file]);
-  return url;
-}
-function chooseImage(file: File | undefined) {
-  if (!file) return null;
-  if (file.size > 5_000_000) throw new Error("Choose an image smaller than 5 MB.");
-  if (!/\.(png|jpe?g|gif|webp)$/i.test(file.name)) throw new Error("Choose a PNG, JPG, GIF, or WebP image.");
-  return file;
-}
 function EmployeeForm({ initial, id, all, departments, onDone }: { initial: EmployeeInput; id?: number; all: Employee[]; departments: Department[]; onDone: (saved?: boolean) => void }) {
   const [f, setF] = useState(initial);
-  const [file, setFile] = useState<File | null>(null);
+  const photoFile = useRef<(() => Promise<File>) | null>(null);
+  const [photoPending, setPhotoPending] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const dialog = useRef<HTMLFormElement>(null);
-  const preview = useFilePreview(file);
   const [discarding, setDiscarding] = useState(false);
-  const dirty = JSON.stringify(f) !== JSON.stringify(initial) || !!file;
+  const dirty = JSON.stringify(f) !== JSON.stringify(initial) || photoPending;
   const cancel = () => { if (lock.current) return; if (dirty) setDiscarding(true); else onDone(); };
   useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.querySelector<HTMLInputElement>("input")?.focus(); return () => previous?.focus(); }, []);
   const forbidden = useMemo(() => {
@@ -42,12 +32,12 @@ function EmployeeForm({ initial, id, all, departments, onDone }: { initial: Empl
     ev.preventDefault(); if (lock.current) return;
     if (!f.name.trim()) { setErr("Enter an employee name."); return; }
     lock.current = true; setBusy(true); setErr("");
-    try { const photo_path = file ? await api.upload("photo", file) : f.photo_path; const body = { ...f, name: f.name.trim(), designation: f.designation.trim(), photo_path }; await (id ? api.update(id, body) : api.create(body)); onDone(true); }
+    try { const photo_path = photoPending && photoFile.current ? await api.upload("photo", await photoFile.current()) : f.photo_path; const body = { ...f, name: f.name.trim(), designation: f.designation.trim(), photo_path }; await (id ? api.update(id, { ...body, revision: (initial as Employee).revision }) : api.create(body)); onDone(true); }
     catch (e) { setErr(message(e)); } finally { lock.current = false; setBusy(false); }
   };
   return <div className="modal"><form ref={dialog} className="card form" role="dialog" aria-modal="true" aria-labelledby="employee-form-title" onSubmit={submit} onKeyDown={(ev) => {
     if (ev.key === "Escape") { ev.preventDefault(); cancel(); }
-    if (ev.key === "Tab") { const targets = Array.from(dialog.current!.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled)')); const first = targets[0], last = targets[targets.length - 1]; if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); } else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first?.focus(); } }
+    if (ev.key === "Tab") { const targets = Array.from(dialog.current!.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), summary')).filter((el) => el.getClientRects().length); const first = targets[0], last = targets[targets.length - 1]; if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); } else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first?.focus(); } }
   }}>
     <h3 id="employee-form-title">{id ? "Edit employee" : "Add employee"}</h3>
     <fieldset disabled={busy} className="form-fields">
@@ -55,8 +45,7 @@ function EmployeeForm({ initial, id, all, departments, onDone }: { initial: Empl
       <label>Department<select value={f.department_id ?? ""} onChange={(e) => set("department_id", e.target.value ? Number(e.target.value) : null)}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === initial.department_id).map((d) => <option key={d.id} value={d.id} disabled={!d.is_active}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select><small>{departments.some((d) => d.is_active) ? "Select the department this employee belongs to." : "Create departments on the Departments page, then assign your people."}</small></label>
       <label>Designation / role<input maxLength={200} list="designation-options" value={f.designation} onChange={(e) => set("designation", e.target.value)} placeholder="e.g. Sales Manager" /><small>Job title or role. Select an existing title or enter a new one.</small></label>
       <datalist id="designation-options">{[...new Set(all.map((e) => e.designation).filter(Boolean))].sort().map((title) => <option key={title} value={title} />)}</datalist>
-      <label>Photo<div className="row">{preview ? <img className="avatar" src={preview} width={44} height={44} alt="Selected employee photo" /> : <Avatar e={f} />}<input type="file" accept=".png,.jpg,.jpeg,.gif,.webp" onChange={(e) => { try { setFile(chooseImage(e.target.files?.[0])); setErr(""); } catch (x) { setErr(message(x)); e.target.value = ""; } }} /></div><small>PNG, JPG, GIF, or WebP. Up to 5 MB. Uploaded when you save.</small></label>
-      {(file || f.photo_path) && <button className="btn" type="button" onClick={() => { setFile(null); set("photo_path", null); }}>Remove photo</button>}
+      <PhotoEditor label="Photo" name={f.name} current={f.photo_path} crop getRef={photoFile} onDirty={setPhotoPending} onRemove={() => set("photo_path", null)} />
       <label>Reports to<select value={f.reports_to_id ?? ""} onChange={(e) => set("reports_to_id", e.target.value ? Number(e.target.value) : null)}><option value="">None - top of hierarchy</option>{all.filter((e) => e.is_active && !forbidden.has(e.id)).map((e) => <option key={e.id} value={e.id}>{e.name} - {e.designation}</option>)}</select></label>
       <label className="check"><input type="checkbox" checked={f.is_board_member} onChange={(e) => set("is_board_member", e.target.checked)} /> Board member</label>
       <details className="advanced"><summary>Advanced</summary>
@@ -103,7 +92,8 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE)), current = Math.min(page, pages);
   const shown = filtered.slice((current - 1) * PAGE, current * PAGE);
   const below = (ids: Iterable<number>) => { const s = new Set<number>(ids); let c = true; while (c) { c = false; for (const p of all) if (p.reports_to_id !== null && s.has(p.reports_to_id) && !s.has(p.id)) { s.add(p.id); c = true; } } return s; };
-  const patch = (e: Employee, change: Partial<EmployeeInput>) => { const { id, name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id } = e; return api.update(id, { name: n, designation, photo_path, reports_to_id, is_board_member, board_order, display_order, is_active, department_id, ...change }); };
+  // Send only the changed field: a stale row snapshot must never overwrite someone else's newer edits.
+  const patch = (e: Employee, change: Partial<EmployeeInput>) => api.update(e.id, change);
   const quickSave = async (e: Employee, change: Partial<EmployeeInput>) => {
     setBusy(true); setToast(null);
     try { await patch(e, change); setToast({ text: `${e.name} updated.` }); await load(true); } catch (x) { setToast({ text: message(x), bad: true }); } finally { setBusy(false); }
@@ -134,12 +124,17 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
   const noManager = below(picked);
   const activeDepartments = departments.filter((d) => d.is_active);
   const filtersOn = [department, role, manager].some(Boolean) || board !== "all" || sort !== "order";
-  return <div className="pad directory wide"><div className="row between"><div><h1>Employees</h1><p className="muted">{all.length} people · {setupCount} still need a department or manager. Tip: tick people to set them all at once.</p></div><button className="btn primary" disabled={loading || !!error} onClick={() => setEditing({ init: { ...blank, department_id: departments.some((d) => d.is_active && String(d.id) === department) ? Number(department) : null } })}>Add employee</button></div>
+  return <div className="pad directory wide"><div className="page-heading row between"><div><h1>Employees</h1><p className="muted">{all.length} people · {setupCount} still need a department or manager. Tip: tick people to set them all at once.</p></div><button className="btn primary" disabled={loading || !!error} onClick={() => setEditing({ init: { ...blank, department_id: departments.some((d) => d.is_active && String(d.id) === department) ? Number(department) : null } })}>Add employee</button></div>
     {error ? <Failure error={error} retry={() => void load()} /> : loading ? <p role="status">Loading employees...</p> : <>
       {boardList.length > 1 && <details className="board-order" open><summary>Board of Directors order ({boardList.length})</summary><p className="muted">Top of this list is shown first in the chart. Use the arrows to move someone.</p><ol>{boardList.map((p, i) => <li key={p.id}><span className="rank">{i + 1}</span><b>{p.name}</b><span className="muted">{p.designation}</span><button className="btn" disabled={busy || i === 0} aria-label={`Move ${p.name} up`} onClick={() => void moveBoard(i, -1)}>↑</button><button className="btn" disabled={busy || i === boardList.length - 1} aria-label={`Move ${p.name} down`} onClick={() => void moveBoard(i, 1)}>↓</button></li>)}</ol></details>}
       <div className="directory-bar">
-        <div className="tabs" role="tablist" aria-label="Employee list">
-          {([["all", `All (${all.length})`], ["setup", `Needs setup (${setupCount})`], ["inactive", `Inactive (${all.filter((e) => !e.is_active).length})`]] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "on" : ""} onClick={() => setTab(key)}>{label}</button>)}
+        <div className="tabs" role="tablist" aria-label="Employee list" onKeyDown={(ev) => {
+          const keys = ["all", "setup", "inactive"] as const;
+          const index = keys.indexOf(tab);
+          const next = ev.key === "ArrowRight" ? (index + 1) % 3 : ev.key === "ArrowLeft" ? (index + 2) % 3 : ev.key === "Home" ? 0 : ev.key === "End" ? 2 : -1;
+          if (next >= 0) { ev.preventDefault(); setTab(keys[next]); ev.currentTarget.querySelectorAll<HTMLButtonElement>('button')[next]?.focus(); }
+        }}>
+          {([["all", `All (${all.length})`], ["setup", `Needs setup (${setupCount})`], ["inactive", `Inactive (${all.filter((e) => !e.is_active).length})`]] as const).map(([key, label]) => <button key={key} role="tab" tabIndex={tab === key ? 0 : -1} aria-selected={tab === key} className={tab === key ? "on" : ""} onClick={() => setTab(key)}>{label}</button>)}
         </div>
         <label className="directory-search">Search<input placeholder="Name, designation, department or manager" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
       </div>
@@ -162,18 +157,18 @@ function Employees({ initialDepartment = "" }: { initialDepartment?: string }) {
         <button className="btn" disabled={busy} onClick={() => setPicked(new Set())}>Clear</button>
       </div>}
       <datalist id="employee-titles">{titles.map((t) => <option key={t} value={t} />)}</datalist>
-      {shown.length ? <div className="table-wrap"><table className="emp-table">
-        <thead><tr><th><input type="checkbox" aria-label="Select everyone on this page" checked={allShownPicked} onChange={togglePage} /></th><th>Name</th><th>Designation / role</th><th>Department</th><th>Reports to</th><th>Board</th><th><span className="sr-only">Actions</span></th></tr></thead>
-        <tbody>{shown.map((e) => <tr key={e.id} className={(picked.has(e.id) ? "picked " : "") + (!e.is_active ? "inactive" : "")}>
-          <td><input type="checkbox" aria-label={`Select ${e.name}`} checked={picked.has(e.id)} onChange={() => toggleOne(e.id)} /></td>
-          <td><div className="who"><Avatar e={e} size={32} /><div><b>{e.name}</b>{!e.is_active && <small>Inactive</small>}</div></div></td>
-          <td><input aria-label={`Designation / role for ${e.name}`} list="employee-titles" maxLength={200} disabled={busy} key={e.id + e.designation} defaultValue={e.designation} placeholder="Pick or type" onBlur={(x) => { const v = x.target.value.trim(); if (v !== e.designation) void quickSave(e, { designation: v }); }} onKeyDown={(x) => { if (x.key === "Enter") x.currentTarget.blur(); else if (x.key === "Escape") { x.currentTarget.value = e.designation; x.currentTarget.blur(); } }} /></td>
-          <td><select aria-label={`Department for ${e.name}`} disabled={busy} value={e.department_id ?? ""} onChange={(x) => void quickSave(e, { department_id: x.target.value ? Number(x.target.value) : null })}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === e.department_id).map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></td>
-          <td><select aria-label={`Reports to for ${e.name}`} disabled={busy} value={e.reports_to_id ?? ""} onChange={(x) => void quickSave(e, { reports_to_id: x.target.value ? Number(x.target.value) : null })}><option value="">None - top of hierarchy</option>{all.filter((m) => m.is_active && m.id !== e.id && !below([e.id]).has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></td>
-          <td className="board-cell"><input type="checkbox" aria-label={`${e.name} is a board member`} disabled={busy} checked={e.is_board_member} onChange={(x) => void quickSave(e, { is_board_member: x.target.checked })} /></td>
+      {shown.length ? <><label className="check select-page"><input type="checkbox" checked={allShownPicked} onChange={togglePage} /> Select everyone on this page</label><div className="table-wrap"><table className="emp-table" role="table">
+        <thead><tr><th><span className="sr-only">Selection</span></th><th>Name</th><th>Designation / role</th><th>Department</th><th>Reports to</th><th>Board</th><th><span className="sr-only">Actions</span></th></tr></thead>
+        <tbody role="rowgroup">{shown.map((e) => <tr role="row" key={e.id} className={(picked.has(e.id) ? "picked " : "") + (!e.is_active ? "inactive" : "")}>
+          <td className="employee-select"><input type="checkbox" aria-label={`Select ${e.name}`} checked={picked.has(e.id)} onChange={() => toggleOne(e.id)} /></td>
+          <td className="employee-name"><div className="who"><Avatar e={e} size={32} /><div><b>{e.name}</b>{!e.is_active && <small>Inactive</small>}</div></div></td>
+          <td data-label="Designation / role"><input aria-label={`Designation / role for ${e.name}`} list="employee-titles" maxLength={200} disabled={busy} key={e.id + e.designation} defaultValue={e.designation} placeholder="Pick or type" onBlur={(x) => { const v = x.target.value.trim(); if (v !== e.designation) void quickSave(e, { designation: v }); }} onKeyDown={(x) => { if (x.key === "Enter") x.currentTarget.blur(); else if (x.key === "Escape") { x.currentTarget.value = e.designation; x.currentTarget.blur(); } }} /></td>
+          <td data-label="Department"><select aria-label={`Department for ${e.name}`} disabled={busy} value={e.department_id ?? ""} onChange={(x) => void quickSave(e, { department_id: x.target.value ? Number(x.target.value) : null })}><option value="">Unassigned</option>{departments.filter((d) => d.is_active || d.id === e.department_id).map((d) => <option key={d.id} value={d.id}>{d.name}{!d.is_active ? " (archived)" : ""}</option>)}</select></td>
+          <td data-label="Reports to"><select aria-label={`Reports to for ${e.name}`} disabled={busy} value={e.reports_to_id ?? ""} onChange={(x) => void quickSave(e, { reports_to_id: x.target.value ? Number(x.target.value) : null })}><option value="">None - top of hierarchy</option>{all.filter((m) => m.is_active && m.id !== e.id && !below([e.id]).has(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name} - {m.designation}</option>)}</select></td>
+          <td className="board-cell" data-label="Board member"><input type="checkbox" aria-label={`${e.name} is a board member`} disabled={busy} checked={e.is_board_member} onChange={(x) => void quickSave(e, { is_board_member: x.target.checked })} /></td>
           <td className="actions"><button className="btn" disabled={busy} onClick={() => setEditing({ id: e.id, init: e })}>Edit<span className="sr-only"> {e.name}</span></button><button className={"btn " + (!e.is_active ? "danger" : "")} disabled={busy} onClick={() => void remove(e)}>{e.is_active ? "Deactivate" : "Delete"}<span className="sr-only"> {e.name}</span></button></td>
         </tr>)}</tbody>
-      </table></div> : <p className="notice">{all.length ? (tab === "setup" ? "Everyone is set up." : "No employees match these filters.") : "No employees yet. Add your first person to get started."}</p>}
+      </table></div></> : <p className="notice">{all.length ? (tab === "setup" ? "Everyone is set up." : "No employees match these filters.") : "No employees yet. Add your first person to get started."}</p>}
       <div className="pagination"><button className="btn" disabled={current === 1} onClick={() => { setPage(current - 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Previous</button><span>{filtered.length} shown · Page {current} of {pages}</span><button className="btn" disabled={current === pages} onClick={() => { setPage(current + 1); document.querySelector("main")?.scrollTo({ top: 0 }); }}>Next</button></div>
     </>}
     {toast && <div className={"toast" + (toast.bad ? " bad" : "")} role={toast.bad ? "alert" : "status"}>{toast.text}{toast.bad && <button className="btn" onClick={() => setToast(null)}>Dismiss</button>}</div>}
@@ -186,20 +181,20 @@ function CompanySettings({ onSaved }: { onSaved: () => void }) {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
-  const [file, setFile] = useState<File | null>(null);
-  const preview = useFilePreview(file);
+  const logoFile = useRef<(() => Promise<File>) | null>(null);
+  const [logoPending, setLogoPending] = useState(false);
+  const [saves, setSaves] = useState(0);
   const load = async () => { setError(""); try { setS(await api.settings()); } catch (e) { setError(message(e)); } };
   useEffect(() => { void load(); }, []);
-  return <div className="pad settings"><h1>Company settings</h1>{error ? <Failure error={error} retry={() => void load()} /> : !s ? <p role="status">Loading settings...</p> : <form className="card form" onSubmit={async (e) => {
+  return <div className="pad settings"><div className="page-heading"><h1>Company settings</h1><p className="muted">Manage the company name and logo shown in your organization chart.</p></div>{error ? <Failure error={error} retry={() => void load()} /> : !s ? <p role="status">Loading settings...</p> : <form className="card form" onSubmit={async (e) => {
     e.preventDefault(); if (lock.current) return;
     if (!s.company_name.trim()) { setMsg("Enter a company name."); return; }
     lock.current = true; setBusy(true); setMsg("");
-    try { const logo_path = file ? await api.upload("logo", file) : s.logo_path; const saved = await api.saveSettings({ ...s, company_name: s.company_name.trim(), logo_path }); setS(saved); setFile(null); setMsg("Company settings saved."); onSaved(); } catch (x) { setMsg(message(x)); } finally { lock.current = false; setBusy(false); }
+    try { const logo_path = logoPending && logoFile.current ? await api.upload("logo", await logoFile.current()) : s.logo_path; const saved = await api.saveSettings({ ...s, company_name: s.company_name.trim(), logo_path }); setS(saved); setLogoPending(false); setSaves((n) => n + 1); setMsg("Company settings saved."); onSaved(); } catch (x) { setMsg(message(x)); } finally { lock.current = false; setBusy(false); }
   }}>
     <fieldset className="form-fields" disabled={busy}>
       <label>Company name<input required maxLength={200} value={s.company_name} onChange={(e) => { setS({ ...s, company_name: e.target.value }); setMsg(""); }} /></label>
-      <label>Logo{(preview || s.logo_path) && <img className="logo-preview" src={preview ?? imgUrl(s.logo_path)} alt="Company logo preview" />}<input type="file" accept=".png,.jpg,.jpeg,.gif,.webp" onChange={(e) => { try { setFile(chooseImage(e.target.files?.[0])); setMsg(""); } catch (x) { setMsg(message(x)); e.target.value = ""; } }} /><small>Up to 5 MB. Uploaded when you save.</small></label>
-      {(file || s.logo_path) && <button type="button" className="btn" onClick={() => { setFile(null); setS({ ...s, logo_path: null }); }}>Remove logo</button>}
+      <PhotoEditor key={saves} label="Logo" name={s.company_name} current={s.logo_path} crop={false} getRef={logoFile} onDirty={setLogoPending} onRemove={() => setS({ ...s, logo_path: null })} />
     </fieldset>
     <button className="btn primary" disabled={busy}>{busy ? "Saving..." : "Save settings"}</button>{msg && <p role="status">{msg}</p>}
   </form>}</div>;
@@ -209,13 +204,18 @@ function AddCompany({ onCreated, onCancel }: { onCreated: (c: CompanyInfo) => vo
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const dialog = useRef<HTMLFormElement>(null);
+  useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.querySelector<HTMLInputElement>('input')?.focus(); return () => previous?.focus(); }, []);
   const submit = async (ev: React.FormEvent) => {
     ev.preventDefault();
     if (!name.trim()) { setErr("Enter a company name."); return; }
     setBusy(true); setErr("");
     try { onCreated(await api.createCompany(name.trim())); } catch (e) { setErr(message(e)); setBusy(false); }
   };
-  return <div className="modal"><form className="card form" role="dialog" aria-modal="true" aria-labelledby="add-company-title" onSubmit={submit} onKeyDown={(ev) => { if (ev.key === "Escape") onCancel(); }}>
+  return <div className="modal"><form ref={dialog} className="card form" role="dialog" aria-modal="true" aria-labelledby="add-company-title" onSubmit={submit} onKeyDown={(ev) => {
+    if (ev.key === "Escape" && !busy) { ev.preventDefault(); onCancel(); }
+    if (ev.key === "Tab") { const targets = Array.from(dialog.current!.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled)')).filter((el) => el.getClientRects().length); const first = targets[0], last = targets[targets.length - 1]; if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); } else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first?.focus(); } }
+  }}>
     <h3 id="add-company-title">Add company</h3>
     <label>Company name<input autoFocus required maxLength={200} value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
     <p className="muted">Each company has its own employees, departments and chart. You can add a logo in Company Settings afterwards.</p>
@@ -223,7 +223,7 @@ function AddCompany({ onCreated, onCancel }: { onCreated: (c: CompanyInfo) => vo
     <div className="row end"><button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button><button className="btn primary" disabled={busy}>{busy ? "Adding..." : "Add company"}</button></div>
   </form></div>;
 }
-export default function App() {
+function Main({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
   const [page, setPage] = useState<(typeof pages)[number]>("Organization Chart");
   const [departmentFilter, setDepartmentFilter] = useState("");
   const [company, setCompany] = useState<Settings | null>(null);
@@ -235,9 +235,37 @@ export default function App() {
   const loadCompany = async () => { setBrandError(""); try { setCompany(await api.settings()); } catch (e) { setBrandError(message(e)); } };
   const loadCompanies = async () => { try { const list = await api.companies(); setCompanies(list); if (list.length && !list.some((c) => c.id === currentCompany())) switchTo(list[0].id); } catch { /* the brand error banner covers load failures */ } };
   useEffect(() => { void loadCompany(); void loadCompanies(); }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <div className="app"><header><div className="brand">{company?.logo_path && <img src={imgUrl(company.logo_path)} alt="" />}{companies.length ? <label className="company-switch"><span className="sr-only">Company</span><select value={companyId} onChange={(e) => e.target.value === "add" ? setAdding(true) : switchTo(Number(e.target.value))}>{companies.map((c) => <option key={c.id} value={c.id}>{c.company_name}</option>)}<option value="add">+ Add company...</option></select></label> : <b>{company?.company_name || "Organization"}</b>}</div><nav aria-label="Main navigation">{pages.map((p) => <button key={p} aria-current={p === page ? "page" : undefined} className={p === page ? "on" : ""} onClick={() => { if (p === "Employees") setDepartmentFilter(""); setPage(p); }}>{p}</button>)}</nav></header>
+  return <div className="app"><header className="app-header glass3d"><div className="brand">{company?.logo_path && <img src={imgUrl(company.logo_path)} alt="" />}{companies.length ? <label className="company-switch"><span className="sr-only">Company</span><select value={companyId} onChange={(e) => e.target.value === "add" ? setAdding(true) : switchTo(Number(e.target.value))}>{companies.map((c) => <option key={c.id} value={c.id}>{c.company_name}</option>)}<option value="add">+ Add company...</option></select></label> : <b>{company?.company_name || "Organization"}</b>}</div>{me.csrf && <div className="account-controls"><span className="account-name" title={me.username}>{me.username}</span><button className="btn" onClick={onSignOut}>Sign out</button></div>}<nav className="app-nav" aria-label="Main navigation">{pages.map((p) => <button key={p} aria-current={p === page ? "page" : undefined} className={p === page ? "on" : ""} onClick={() => { if (p === "Employees") setDepartmentFilter(""); setPage(p); }}>{p}</button>)}</nav></header>
     {brandError && <div className="brand-error" role="alert">Company details could not load. <button className="btn" onClick={() => void loadCompany()}>Retry</button></div>}
     <main key={companyId}>{page === "Organization Chart" && <OrgChart />}{page === "Employees" && <Employees key={departmentFilter} initialDepartment={departmentFilter} />}{page === "Departments" && <Departments onViewEmployees={(id) => { setDepartmentFilter(String(id)); setPage("Employees"); }} />}{page === "Company Settings" && <CompanySettings onSaved={() => { void loadCompany(); void loadCompanies(); }} />}</main>
     {adding && <AddCompany onCancel={() => setAdding(false)} onCreated={(c) => { setAdding(false); switchTo(c.id); }} />}
   </div>;
+}
+
+function SignIn({ onDone }: { onDone: (me: Me) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (ev: React.FormEvent) => {
+    ev.preventDefault(); setBusy(true); setErr("");
+    try { onDone(await api.login(username, password)); } catch (e) { setErr(message(e)); setBusy(false); }
+  };
+  return <div className="auth-page"><form className="card form auth-card" onSubmit={submit} aria-labelledby="sign-in-title">
+    <div className="auth-heading"><span className="auth-mark" aria-hidden="true">OC</span><h1 id="sign-in-title">Welcome back</h1><p className="muted">Sign in to your organization workspace.</p></div>
+    <fieldset className="form-fields" disabled={busy}>
+      <label>Username<input autoFocus required autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
+      <label>Password<input required type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+    </fieldset>
+    {err && <p className="err" role="alert">{err}</p>}
+    <button className="btn primary" disabled={busy}>{busy ? "Signing in..." : "Sign in"}</button>
+  </form></div>;
+}
+export default function App() {
+  const [me, setMe] = useState<Me | null | undefined>(undefined);
+  const enter = (m: Me | null) => { setCsrf(m?.csrf ?? ""); setMe(m); };
+  useEffect(() => { onUnauthorized(() => enter(null)); api.me().then(enter, () => enter(null)); }, []);
+  if (me === undefined) return <p className="muted pad" role="status">Loading...</p>;
+  if (!me) return <SignIn onDone={enter} />;
+  return <Main me={me} onSignOut={() => void api.logout().finally(() => enter(null))} />;
 }

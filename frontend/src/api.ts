@@ -10,9 +10,11 @@ export type Employee = {
   board_order: number;
   display_order: number;
   is_active: boolean;
+  revision: number;
   created_at: string;
 };
-export type EmployeeInput = Omit<Employee, "id" | "created_at" | "department_name">;
+export type EmployeeInput = Omit<Employee, "id" | "created_at" | "department_name" | "revision">;
+export type Me = { id: number; username: string; is_admin: boolean; csrf: string; memberships: Record<string, "viewer" | "editor"> };
 export type Department = { id: number; name: string; description: string; is_active: boolean; employee_count: number; active_employee_count: number };
 export type DepartmentInput = Pick<Department, "name" | "description" | "is_active">;
 export type Settings = { id: number; company_name: string; logo_path: string | null };
@@ -32,7 +34,12 @@ let companyId = 1;
 try { companyId = Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { /* storage unavailable: default company */ }
 export const currentCompany = () => companyId;
 export const selectCompany = (id: number) => { companyId = id; try { localStorage.setItem(COMPANY_KEY, String(id)); } catch { /* not remembered */ } };
-const withCompany = (init: RequestInit = {}): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string>), "X-Company-Id": String(companyId) } });
+// Signed-in user: the CSRF token comes from login or /api/auth/me and is sent with every write.
+let csrf = "";
+export const setCsrf = (token: string) => { csrf = token; };
+let onSignedOut: () => void = () => {};
+export const onUnauthorized = (fn: () => void) => { onSignedOut = fn; };
+const withCompany = (init: RequestInit = {}): RequestInit => ({ ...init, credentials: "same-origin", headers: { ...(init.headers as Record<string, string>), "X-Company-Id": String(companyId), "X-CSRF-Token": csrf } });
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, withCompany(init));
@@ -42,6 +49,7 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return r.json();
 }
 async function responseError(r: Response) {
+  if (r.status === 401) onSignedOut();
   const d = await r.json().catch(() => ({}));
   return new Error(typeof d.detail === "string" ? d.detail : Array.isArray(d.detail)
     ? d.detail.map((e: { loc: string[]; msg: string }) => `${e.loc.slice(1).join(".")}: ${e.msg}`).join("; ")
@@ -53,7 +61,20 @@ const json = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+/** Landing page data: read-only, no sign-in. Nodes carry only the public fields (see PUBLIC_FIELDS in main.py). */
+export type PublicCompany = { id: number; company_name: string; logo_path: string | null };
+async function publicGet<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) throw await responseError(r);
+  return r.json();
+}
+
 export const api = {
+  publicCompanies: () => publicGet<PublicCompany[]>("/api/public/companies"),
+  publicChart: (company: number) => publicGet<OrgChartData>(`/api/public/chart?company=${company}`),
+  me: () => req<Me>("/api/auth/me"),
+  login: (username: string, password: string) => req<Me>("/api/auth/login", json("POST", { username, password })),
+  logout: () => req("/api/auth/logout", { method: "POST" }),
   companies: () => req<CompanyInfo[]>("/api/companies"),
   createCompany: (company_name: string) => req<CompanyInfo>("/api/companies", json("POST", { company_name })),
   departments: () => req<Department[]>("/api/departments"),
@@ -69,7 +90,7 @@ export const api = {
   employees: () => req<Employee[]>("/api/employees"),
   employee: (id: number) => req<Employee>(`/api/employees/${id}`),
   create: (e: EmployeeInput) => req<Employee>("/api/employees", json("POST", e)),
-  update: (id: number, e: EmployeeInput) => req<Employee>(`/api/employees/${id}`, json("PUT", e)),
+  update: (id: number, e: Partial<EmployeeInput> & { revision?: number }) => req<Employee>(`/api/employees/${id}`, json("PUT", e)),
   remove: (id: number, hard = false) => req(`/api/employees/${id}?hard=${hard}`, { method: "DELETE" }),
   manager: (id: number) => req<Employee | null>(`/api/employees/${id}/manager`),
   reports: (id: number) => req<Employee[]>(`/api/employees/${id}/direct-reports`),
