@@ -23,12 +23,31 @@ The server also hosts Customer 360 and other apps. Port 8010 and the `orgchart` 
   `ssh shangrila002@100.94.204.57 'cp ~/orgchart/data/orgchart.db ~/orgchart/data/orgchart.db.bak-$(date +%F)'`
 - Do not commit databases, backups, logs, or screenshots (excluded in `.gitignore`).
 
-## Redeploy after a code change
+## Deploy / redeploy (from GitHub)
 
-1. Build the frontend: `cd frontend && npm run build`
-2. Copy `backend/main.py`, `backend/security.py`, `backend/pdf_export.py`, `.dockerignore`, `backend/requirements.txt`, `frontend/dist`, `Dockerfile`, `docker-compose.yml` to `~/orgchart` on the server. **Do not overwrite `~/orgchart/data`.**
-3. On the server: `cd ~/orgchart && docker compose up -d --build`
-4. Check: `curl http://127.0.0.1:8010/api/employees`
+The Docker image builds the frontend itself (two-stage `Dockerfile`), so no local build or file copying is needed.
+
+Every update, on the server (`ssh shangrila002@100.94.204.57`):
+```
+cd ~/orgchart
+cp data/orgchart.db data/orgchart.db.bak-$(date +%F)    # back up first (project rule)
+git pull
+docker compose up -d --build
+curl -s -o /dev/null -w "%{http_code}
+" http://127.0.0.1:8010/api/public/chart?company=1   # 200
+```
+
+One-time setup, replacing the old copied folder (keeps the live database and uploads in `data/`):
+```
+cd ~ && mv orgchart orgchart-old
+git clone https://github.com/it-sla/orgchart.git orgchart
+mv orgchart-old/data orgchart/data
+cd orgchart && docker compose up -d --build
+docker compose exec -it orgchart python main.py create-admin <username>   # first admin, once
+```
+Delete `~/orgchart-old` and run `docker image prune -f` once the new container works: the old image and folder still hold a copy of the database. If the repo is private, give the server a deploy key or token.
+
+Check the image has no databases: `docker compose run --rm --no-deps --entrypoint sh orgchart -c 'find /app -name "*.db*" -o -name "*.bak*" -o -name "*.log"'` should print nothing.
 
 Logs: `docker logs orgchart`. Restart: `docker restart orgchart`. Stop: `docker compose down` (data is kept; never delete `data/`).
 
@@ -37,7 +56,7 @@ Logs: `docker logs orgchart`. Restart: `docker restart orgchart`. Stop: `docker 
 - Every `/api` and `/uploads` request needs a signed-in session (cookie + CSRF token). Roles: **viewer** (read + export), **editor** (edit), **admin** (all companies, hard delete, add companies, users).
 - First admin, on the server after redeploy: `docker compose exec -it orgchart python main.py create-admin <username>` (prompts for a 12+ character password). Other users: admin calls `POST /api/users` (no Users page yet).
 - Set `ORG_COOKIE_SECURE=1` when served over HTTPS. Docker image now contains only `main.py`, `security.py`, `pdf_export.py` (see `.dockerignore`); the old image still holds a database copy, so rebuild and remove it.
-- Redeploy file list now also includes `backend/security.py`. Employee `PUT` is partial and takes an optional `revision` (409 on stale).
+- Employee `PUT` is partial and takes an optional `revision` (409 on stale).
 
 ## Public landing page and /admin (added 2026-10-09)
 
