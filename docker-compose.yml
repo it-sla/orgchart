@@ -7,7 +7,7 @@ services:
       ORG_COOKIE_SECURE: "${ORG_COOKIE_SECURE:-0}"  # set to 1 (in .env next to this file) once the site is served over HTTPS
       ORG_AUTH: "1"  # "0" disables sign-in entirely (private network only). First admin: python main.py create-admin <name>
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"  # only the host (nginx) can reach the app; the public entry is https://orgchart.shangrilatours.com.np
     volumes:
       - ./data:/data
       - ./data/uploads:/app/backend/uploads
