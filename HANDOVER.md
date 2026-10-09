@@ -32,9 +32,16 @@ The server also hosts Customer 360 and other apps. Port 8010 and the `orgchart` 
 
 Logs: `docker logs orgchart`. Restart: `docker restart orgchart`. Stop: `docker compose down` (data is kept; never delete `data/`).
 
+## Board of Directors rules (added 2026-10-09)
+
+- Tick **Board member** on the Employees page to put someone in the Board of Directors box on the chart.
+- A board member who **reports to nobody** shows **only** in the board box (not as a separate card). Done in `buildLayout` (`chartLayout.ts`) and in `export_pdf` (`main.py`); keep the two in sync.
+- Order of the box = `board_order`, lowest first, ties alphabetical. Set it in the **"Board of Directors order"** panel at the top of the Employees page (up/down arrows, renumbers 1..n). It is not "Display order" (that only orders people within the chart/list).
+- PDF export (chart styles) shows the company logo top-left in the header.
+
 ## Current state of the data
 
-- 65 employees. **No "Reports to" is set for anyone** (cleared on request on 2026-10-08). The chart shows everyone at the top level until managers are reassigned.
+- 65 employees. As of 2026-10-08 **no "Reports to" was set** on the server copy (cleared on request); it may have been re-entered since, so check the Employees page. Board ranks on the server also need setting with the new panel.
 - Departments: Admin, Customer Support, Finance, IT, Marketing, Operations, Sales. No employees are assigned to a department yet.
 - Assign both from the Employees page: each card has Department and Reports to dropdowns that save immediately.
 - Pre-change backups on this PC (not in git): `backend/orgchart.db.bak-before-clear-reports` (has the old reporting lines), `backend/orgchart.db.bak-departments`, `output/backups/`.
@@ -48,7 +55,7 @@ Logs: `docker logs orgchart`. Restart: `docker restart orgchart`. Stop: `docker 
 
 ## Open items
 
-1. **Git**: source, `Dockerfile`, `docker-compose.yml` and this file are committed on `main` and pushed to `origin` = https://github.com/it-sla/orgchart.git.
+1. **Git**: `origin` = https://github.com/it-sla/orgchart.git. The three 2026-10-09 commits (board rules, board order panel, PDF logo) are deployed but **not yet pushed**: run `git push`.
 2. **No authentication.** Consider a shared edit password or view-only mode for other devices.
 3. **Reporting lines** need to be re-entered (see above), or restored from the backup file.
 4. Give the server a fixed LAN address (DHCP reservation) so the URL stops changing.
