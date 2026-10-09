@@ -1,4 +1,6 @@
 import os, tempfile
+os.environ["ORG_AUTH"] = "1"
+os.environ["ORG_RATE_MULTIPLIER"] = "1000"  # the suite makes far more requests than the per-minute limits allow
 os.environ["ORG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 
 from fastapi.testclient import TestClient
@@ -10,7 +12,20 @@ import pytest
 from PIL import Image
 from pypdf import PdfReader
 
+import security
+
+PASSWORD = "correct horse battery"
 c = TestClient(main.app)
+security.bootstrap_admin(main.engine, "admin", PASSWORD)
+
+
+def sign_in(client, username="admin", password=PASSWORD):
+    r = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    client.headers["X-CSRF-Token"] = r.json()["csrf"]
+
+
+sign_in(c)
 
 
 def mk(name, to=None, **kw):
@@ -115,7 +130,9 @@ def test_chart_pdf_preserves_layout_and_scope(layout):
     child = mk(f"{layout} export child", manager)
     hidden = mk(f"{layout} hidden report", child)
     positions = [{"id": str(manager), "x": 0, "y": 0}, {"id": str(child), "x": 300, "y": 300}]
-    positions.append({"id": "company" if layout == "radial" else "board", "x": -200, "y": -200})
+    positions.append({"id": "board", "x": -200, "y": -200})
+    if layout == "radial":
+        positions.append({"id": "company", "x": -200, "y": -400})
     body = {"scope": "visible", "ids": [manager, child], "layout": layout, "positions": positions, "paper": "chart"}
     for paper in ["chart", "a4", "letter"]:
         body["paper"] = paper
@@ -186,9 +203,9 @@ def test_existing_database_department_migration_is_additive_and_idempotent(tmp_p
     main.migrate_employee_fields(database)
     main.migrate_employee_fields(database)
     with database.connect() as connection:
-        assert "department_id" in {column["name"] for column in inspect(connection).get_columns("employees")}
-        rows = connection.execute(text("SELECT * FROM employees ORDER BY id")).all()
-        assert rows == [(1, "Existing manager", "Director", None, None, 1), (2, "Existing employee", "Executive", 1, None, 1)]
+        assert {"department_id", "board_order", "is_board_member", "revision"} <= {column["name"] for column in inspect(connection).get_columns("employees")}
+        rows = connection.execute(text("SELECT id, name, designation, reports_to_id, department_id, company_id, board_order, is_active FROM employees ORDER BY id")).all()
+        assert rows == [(1, "Existing manager", "Director", None, None, 1, 0, 1), (2, "Existing employee", "Executive", 1, None, 1, 0, 1)]
     database.dispose()
 
 
@@ -250,3 +267,113 @@ def test_companies_are_isolated():
     assert c.get("/api/org-chart", headers=h).json()["company"]["company_name"] == "Second Co"
     assert c.get("/api/employees", headers={"X-Company-Id": "999"}).status_code == 404
     assert {x["company_name"] for x in c.get("/api/companies").json()} >= {"Second Co"}
+
+
+def test_access_control_and_roles():
+    anonymous = TestClient(main.app)
+    assert anonymous.get("/api/employees").status_code == 401
+    assert anonymous.post("/api/employees", json={"name": "x"}).status_code == 401
+    assert anonymous.get("/uploads/anything.png").status_code == 404  # photos are public (the landing page shows them)
+    other = c.post("/api/companies", json={"company_name": "Access Co"}).json()["id"]
+    assert c.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
+    r = c.post("/api/users", json={"username": "Viewer", "password": "viewer password 1", "memberships": [{"company_id": 1, "role": "viewer"}]})
+    assert r.status_code == 201, r.text
+    viewer = TestClient(main.app)
+    sign_in(viewer, "viewer", "viewer password 1")
+    boss = mk("Access boss")
+    assert viewer.get("/api/employees").status_code == 200
+    assert viewer.post("/api/employees", json={"name": "nope"}).status_code == 403
+    assert viewer.delete(f"/api/employees/{boss}").status_code == 403
+    assert viewer.post("/api/export/pdf", json={"scope": "full"}).status_code == 200
+    assert viewer.get("/api/employees", headers={"X-Company-Id": str(other)}).status_code == 403
+    assert [x["id"] for x in viewer.get("/api/companies").json()] == [1]
+    assert viewer.post("/api/companies", json={"company_name": "Viewer Co"}).status_code == 403
+    assert viewer.post("/api/upload/photo", files={"file": ("a.png", b"x", "image/png")}).status_code == 403
+    c.put("/api/users/2", json={"username": "viewer", "memberships": [{"company_id": 1, "role": "editor"}]})
+    editor = TestClient(main.app)
+    sign_in(editor, "viewer", "viewer password 1")
+    gone = mk("Hard delete target", is_active=False)
+    assert editor.post("/api/employees", json={"name": "Editor made"}).status_code == 201
+    assert editor.delete(f"/api/employees/{gone}?hard=true").status_code == 403
+    assert c.delete(f"/api/employees/{gone}?hard=true").status_code == 200
+    # Cross-site writes and missing CSRF tokens are refused.
+    assert editor.post("/api/employees", json={"name": "csrf"}, headers={"Origin": "http://evil.example"}).status_code == 403
+    assert editor.post("/api/employees", json={"name": "csrf"}, headers={"X-CSRF-Token": "bad"}).status_code == 403
+
+
+def test_concurrent_manager_changes_cannot_create_a_cycle(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    a, b = mk("Cycle A"), mk("Cycle B")
+    original = main.validate_manager
+    barrier = threading.Barrier(2, timeout=.5)
+
+    def slow(*args):
+        original(*args)
+        try:
+            barrier.wait()  # lets both requests validate before either commits, unless the lock serializes them
+        except threading.BrokenBarrierError:
+            pass
+
+    monkeypatch.setattr(main, "validate_manager", slow)
+    with ThreadPoolExecutor(2) as pool:
+        codes = sorted(f.result().status_code for f in [pool.submit(c.put, f"/api/employees/{a}", json={"reports_to_id": b}),
+                                                         pool.submit(c.put, f"/api/employees/{b}", json={"reports_to_id": a})])
+    assert codes == [200, 400]
+
+
+def test_updates_are_partial_and_stale_revisions_conflict():
+    id = mk("Revision person", designation="Original title")
+    first = c.get(f"/api/employees/{id}").json()
+    assert c.put(f"/api/employees/{id}", json={"designation": "New title", "revision": first["revision"]}).status_code == 200
+    # A stale snapshot is rejected rather than reverting the title.
+    assert c.put(f"/api/employees/{id}", json={"name": "Renamed", "revision": first["revision"]}).status_code == 409
+    # A field-only edit changes nothing else.
+    assert c.put(f"/api/employees/{id}", json={"display_order": 5}).status_code == 200
+    now = c.get(f"/api/employees/{id}").json()
+    assert (now["designation"], now["name"], now["display_order"], now["is_active"]) == ("New title", "Revision person", 5, True)
+    assert c.put(f"/api/employees/{id}", json={"name": None}).status_code == 422
+
+
+def test_board_members_with_no_manager_in_every_layout():
+    director = mk("Layout director", is_board_member=True)
+    report = mk("Layout director report", director)
+    for layout, extra in [("radial", {"id": "company", "x": 0, "y": 0}), ("compact", None), ("tree", None)]:
+        positions = [{"id": str(report), "x": 0, "y": 300}, {"id": "board", "x": 0, "y": 0}]
+        if extra:
+            positions.append(extra)
+        body = {"scope": "visible", "ids": [report], "layout": layout, "positions": positions, "paper": "chart"}
+        r = c.post("/api/export/pdf", json=body)
+        assert r.status_code == 200, r.text
+        text = " ".join(PdfReader(io.BytesIO(r.content)).pages[0].extract_text().split())
+        assert "Board of Directors" in text and "Layout director" in text and "Layout director report" in text
+        # A radial export without the board box position is incomplete.
+        if layout == "radial":
+            body["positions"] = [positions[0], extra]
+            assert c.post("/api/export/pdf", json=body).status_code == 400
+
+
+def test_public_landing_data_is_read_only_and_minimal():
+    anonymous = TestClient(main.app)
+    mk("Public person", designation="Analyst")
+    companies = anonymous.get("/api/public/companies")
+    assert companies.status_code == 200 and companies.json()[0]["id"] == 1
+    r = anonymous.get("/api/public/chart?company=1")
+    assert r.status_code == 200
+    person = next(n for n in r.json()["nodes"] if n["name"] == "Public person")
+    assert set(person) == set(main.PUBLIC_FIELDS)
+    assert anonymous.get("/api/public/chart?company=999").status_code == 404
+    # Everything else, and every write, still needs a sign-in.
+    assert anonymous.get("/api/employees").status_code == 401
+    assert anonymous.post("/api/public/chart", json={}).status_code == 401
+    assert anonymous.put("/api/employees/1", json={"name": "x"}).status_code == 401
+    assert anonymous.get("/uploads/missing.png").status_code == 404  # public, just absent
+
+
+def test_admin_deep_link_serves_the_app_and_passwords_can_be_reset():
+    if main.DIST.exists():
+        page = TestClient(main.app).get("/admin")
+        assert page.status_code == 200 and "text/html" in page.headers["content-type"]
+    security.reset_password(main.engine, "admin", "a brand new password")
+    assert TestClient(main.app).post("/api/auth/login", json={"username": "admin", "password": "a brand new password"}).status_code == 200
+    security.reset_password(main.engine, "admin", PASSWORD)

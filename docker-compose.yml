@@ -3,6 +3,8 @@ services:
     build: .
     container_name: orgchart
     restart: unless-stopped
+    environment:
+      ORG_AUTH: "1"  # "0" disables sign-in entirely (private network only). First admin: python main.py create-admin <name>
     ports:
       - "8010:8010"
     volumes:

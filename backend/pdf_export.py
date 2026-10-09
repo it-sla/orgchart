@@ -200,7 +200,7 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
     if mode == "radial":
         p = positions["company"]
         boxes["company"] = (p["x"], p["y"], 144, 144)
-    elif data["board"]:
+    if data["board"]:
         p = positions["board"]
         boxes["board"] = (p["x"], p["y"], 240, 44 + 68 * len(data["board"]))
     left = min(b[0] for b in boxes.values()) - 36
@@ -287,17 +287,21 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
         dx, dy = bx-ax, by-ay; length = math.hypot(dx, dy) or 1
         r = 72 if company else 42
         line([(ax+dx/length*r, ay+dy/length*r), (bx-dx/length*42, by-dy/length*42)], company)
-    for edge in data['edges']:
+    # Direct reports of board members who sit only in the board box hang off that box.
+    board_edges = [{'source': 'board', 'target': k} for k in data.get('board_kids', [])] if data['board'] else []
+    for edge in data['edges'] + board_edges:
         a, b = boxes[str(edge['source'])], boxes[str(edge['target'])]
-        if mode == 'radial': radial_line(a, b)
+        if mode == 'radial':
+            if edge['source'] == 'board': line([(a[0]+a[2]/2, a[1]+a[3]), (b[0]+b[2]/2, b[1])])
+            else: radial_line(a, b)
         elif mode == 'compact':
-            line([(a[0], a[1]+50), (a[0]-24, a[1]+50), (a[0]-24, b[1]+50), (b[0], b[1]+50)])
+            line([(a[0], a[1]+a[3]/2), (a[0]-24, a[1]+a[3]/2), (a[0]-24, b[1]+50), (b[0], b[1]+50)])
         else:
             if positions[str(edge['target'])].get('stacked'):
-                line([(a[0]+12, a[1]+card_h), (a[0]+12, b[1]+card_h/2), (b[0], b[1]+card_h/2)])
+                line([(a[0]+12, a[1]+a[3]), (a[0]+12, b[1]+card_h/2), (b[0], b[1]+card_h/2)])
                 continue
-            middle = (a[1]+card_h+b[1])/2
-            line([(a[0]+120, a[1]+card_h), (a[0]+120, middle), (b[0]+120, middle), (b[0]+120, b[1])])
+            middle = (a[1]+a[3]+b[1])/2
+            line([(a[0]+120, a[1]+a[3]), (a[0]+120, middle), (b[0]+120, middle), (b[0]+120, b[1])])
     if mode == 'radial':
         managed = {str(e['target']) for e in data['edges']}
         for key in people:
@@ -335,7 +339,7 @@ def make_chart_pdf(data, uploads, paper, orientation, scope, mode, positions):
     if 'group' in boxes:
         x,y,w,h = boxes['group']; rect(x,y,w,h,'#f1f5f9','#94a3b8',10)
         px,py = xy(x+16,y+27); text(positions['group'].get('label') or 'Not yet placed',px,py,w-32,bold,13,'#334155',max_lines=1)
-    if mode != 'radial' and data['board']:
+    if data['board']:
         x,y,w,h=boxes['board']; rect(x,y,w,h,'#eef3fa','#c9d7e7',12)
         px,py=xy(x+12,y+25); text('Board of Directors',px,py,216,bold,13)
         for i,e in enumerate(data['board']):

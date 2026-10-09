@@ -1,15 +1,18 @@
 import datetime as dt
 import os
+import sys
+import threading
 import uuid
 import io
 import warnings
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+import security
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image, UnidentifiedImageError
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import ForeignKey, create_engine, select, inspect, text, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -65,6 +68,7 @@ class Employee(Base):
     board_order: Mapped[int] = mapped_column(default=0)
     display_order: Mapped[int] = mapped_column(default=0)
     is_active: Mapped[bool] = mapped_column(default=True)
+    revision: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
 
 
@@ -75,6 +79,12 @@ def migrate_employee_fields(database_engine):
         columns = {column["name"] for column in inspect(connection).get_columns("employees")}
         if "department_id" not in columns:
             connection.execute(text("ALTER TABLE employees ADD COLUMN department_id INTEGER REFERENCES departments(id)"))
+        # Older databases predate these columns; without them every employee query fails.
+        for column, ddl in (("is_board_member", "BOOLEAN NOT NULL DEFAULT 0"), ("board_order", "INTEGER NOT NULL DEFAULT 0"),
+                            ("display_order", "INTEGER NOT NULL DEFAULT 0"), ("is_active", "BOOLEAN NOT NULL DEFAULT 1"),
+                            ("revision", "INTEGER NOT NULL DEFAULT 0")):
+            if column not in columns:
+                connection.execute(text(f"ALTER TABLE employees ADD COLUMN {column} {ddl}"))
         # Multi-company: existing rows belong to company 1. SQLite cannot add a REFERENCES column with a
         # non-NULL default, so existing databases get a plain column (validated in code).
         tables = inspect(connection).get_table_names()
@@ -92,13 +102,38 @@ with SessionLocal() as _s:
         _s.commit()
 
 
-def db(x_company_id: int = Header(1)):
-    """Session scoped to the company named by the X-Company-Id header (default 1)."""
+def db(request: Request, x_company_id: int = Header(1)):
+    """Session scoped to the X-Company-Id company, after checking the signed-in user may use it."""
+    user = request.state.user
+    role = "admin" if user["is_admin"] else user["memberships"].get(str(x_company_id))
+    if role is None:
+        raise HTTPException(403, "You do not have access to this company")
+    # Exporting is a POST but only reads data, so viewers may do it.
+    if role == "viewer" and request.method not in {"GET", "HEAD"} and request.url.path != "/api/export/pdf":
+        raise HTTPException(403, "Your role is view-only")
     with SessionLocal() as s:
         if not s.get(CompanySettings, x_company_id):
             raise HTTPException(404, "Company not found")
         s.info["company_id"] = x_company_id
+        s.info["admin"] = role == "admin"
         yield s
+
+
+def require_admin(s: Session):
+    if not s.info["admin"]:
+        raise HTTPException(403, "Administrator access required")
+
+
+def require_editor(request: Request):
+    user = request.state.user
+    if not user["is_admin"] and "editor" not in user["memberships"].values():
+        raise HTTPException(403, "Your role is view-only")
+
+
+# Employee edits validate the hierarchy and then commit; this lock makes that one step so two requests
+# cannot each validate against the old graph and together create a cycle.
+# ponytail: in-process lock, valid for the single uvicorn worker in the Dockerfile; use BEGIN IMMEDIATE for several workers.
+hierarchy_lock = threading.Lock()
 
 
 def cid(s: Session) -> int:
@@ -113,9 +148,24 @@ class EmployeeIn(BaseModel):
     photo_path: str | None = None
     reports_to_id: int | None = None
     is_board_member: bool = False
-    board_order: int = 0
-    display_order: int = 0
+    board_order: int = Field(default=0, ge=-1_000_000, le=1_000_000)
+    display_order: int = Field(default=0, ge=-1_000_000, le=1_000_000)
     is_active: bool = True
+
+
+class EmployeePatch(BaseModel):
+    """PUT body: only fields the client sends are changed; `revision` guards against overwriting newer edits."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    designation: str | None = Field(default=None, max_length=200)
+    department_id: int | None = Field(default=None, gt=0)
+    photo_path: str | None = None
+    reports_to_id: int | None = None
+    is_board_member: bool | None = None
+    board_order: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
+    display_order: int | None = Field(default=None, ge=-1_000_000, le=1_000_000)
+    is_active: bool | None = None
+    revision: int | None = None
 
 
 class SettingsIn(BaseModel):
@@ -201,6 +251,25 @@ def settings_dict(s: Session):
 
 
 app = FastAPI(title="Org Chart")
+def company_ids():
+    with SessionLocal() as s:
+        return set(s.scalars(select(CompanySettings.id)))
+
+
+# Sign-in is on by default (accounts and roles, see security.py). ORG_AUTH=0 is for a trusted private network or
+# local development only: everyone who can reach the app then acts as an administrator.
+LOCAL_USER = {"id": 0, "username": "local", "is_admin": True, "csrf": "", "memberships": {}}
+if os.environ.get("ORG_AUTH", "1") == "1":
+    security.install(app, engine, company_ids)
+else:
+    @app.middleware("http")
+    async def local_user(request: Request, call_next):
+        request.state.user = LOCAL_USER
+        return await call_next(request)
+
+    @app.get("/api/auth/me")
+    def local_me():
+        return LOCAL_USER
 app.mount("/uploads", StaticFiles(directory=UPLOADS), name="uploads")
 
 
@@ -266,6 +335,7 @@ def update_department(id: int, body: DepartmentIn, s: Session = Depends(db)):
 def delete_department(id: int, hard: bool = False, s: Session = Depends(db)):
     department = find_department(s, id)
     if hard:
+        require_admin(s)
         if department.is_active:
             raise HTTPException(409, "Archive the department before permanently deleting it")
         if s.scalar(select(Employee.id).where(Employee.department_id == id).limit(1)) is not None:
@@ -295,43 +365,54 @@ def get_employee(id: int, s: Session = Depends(db)):
 @app.post("/api/employees", status_code=201)
 def create_employee(body: EmployeeIn, s: Session = Depends(db)):
     validate_image_reference(body.photo_path)
-    validate_department(s, body.department_id)
-    validate_manager(s, None, body.reports_to_id)
-    e = Employee(**body.model_dump(), company_id=cid(s))
-    s.add(e)
-    s.commit()
-    return emp_dict(e)
+    with hierarchy_lock:
+        validate_department(s, body.department_id)
+        validate_manager(s, None, body.reports_to_id)
+        e = Employee(**body.model_dump(), company_id=cid(s))
+        s.add(e)
+        s.commit()
+        return emp_dict(e)
 
 
 @app.put("/api/employees/{id}")
-def update_employee(id: int, body: EmployeeIn, s: Session = Depends(db)):
-    validate_image_reference(body.photo_path)
-    e = get_emp(s, id)
-    validate_manager(s, id, body.reports_to_id)
-    updates = body.model_dump()
-    # Older clients may omit the new fields; preserve existing assignments.
-    for key in ("department_id",):
-        if key not in body.model_fields_set:
-            updates.pop(key)
-    validate_department(s, updates.get("department_id", e.department_id), e.department_id)
-    for k, v in updates.items():
-        setattr(e, k, v)
-    if not e.is_active:
-        release_reports(s, e)
-    s.commit()
-    return emp_dict(e)
+def update_employee(id: int, body: EmployeePatch, s: Session = Depends(db)):
+    updates = body.model_dump(exclude_unset=True)
+    revision = updates.pop("revision", None)
+    for key in ("name", "designation", "is_board_member", "board_order", "display_order", "is_active"):
+        if key in updates and updates[key] is None:
+            raise HTTPException(422, f"{key} cannot be empty")
+    validate_image_reference(updates.get("photo_path"))
+    with hierarchy_lock:
+        e = get_emp(s, id)
+        if revision is not None and revision != e.revision:
+            raise HTTPException(409, "This person was changed by someone else. Reload and try again.")
+        if "reports_to_id" in updates:
+            validate_manager(s, id, updates["reports_to_id"])
+        if "department_id" in updates:
+            validate_department(s, updates["department_id"], e.department_id)
+        for k, v in updates.items():
+            setattr(e, k, v)
+        e.revision += 1
+        if not e.is_active:
+            release_reports(s, e)
+        s.commit()
+        return emp_dict(e)
 
 
 @app.delete("/api/employees/{id}")
 def delete_employee(id: int, hard: bool = False, s: Session = Depends(db)):
-    """Deactivates by default; ?hard=true removes the row."""
-    e = get_emp(s, id)
-    release_reports(s, e)
+    """Deactivates by default; ?hard=true (administrators only) removes the row."""
     if hard:
-        s.delete(e)
-    else:
-        e.is_active = False
-    s.commit()
+        require_admin(s)
+    with hierarchy_lock:
+        e = get_emp(s, id)
+        release_reports(s, e)
+        if hard:
+            s.delete(e)
+        else:
+            e.is_active = False
+            e.revision += 1
+        s.commit()
     return {"ok": True}
 
 
@@ -358,6 +439,29 @@ def chain(id: int, s: Session = Depends(db)):
     return out
 
 
+PUBLIC_FIELDS = ("id", "name", "designation", "department_name", "photo_path", "reports_to_id", "is_board_member", "board_order", "display_order")
+
+
+@app.get("/api/public/companies")
+def public_companies():
+    with SessionLocal() as s:
+        return [{"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path}
+                for c in s.scalars(select(CompanySettings).order_by(CompanySettings.id)).all()]
+
+
+@app.get("/api/public/chart")
+def public_chart(company: int = 1):
+    """Read-only data for the landing page: active people only, and no admin fields (revision, timestamps...)."""
+    with SessionLocal() as s:
+        if not s.get(CompanySettings, company):
+            raise HTTPException(404, "Company not found")
+        s.info["company_id"] = company
+        data = org_chart(s)
+        slim = lambda e: {k: e[k] for k in PUBLIC_FIELDS}
+        return {"company": data["company"], "board": [slim(e) for e in data["board"]],
+                "nodes": [slim(e) for e in data["nodes"]], "edges": data["edges"]}
+
+
 @app.get("/api/org-chart")
 def org_chart(s: Session = Depends(db)):
     es = s.scalars(select(Employee).where(Employee.is_active, Employee.company_id == cid(s)).order_by(Employee.display_order, Employee.name)).all()
@@ -372,21 +476,26 @@ def org_chart(s: Session = Depends(db)):
 
 
 @app.get("/api/companies")
-def list_companies(s: Session = Depends(db)):
-    counts = dict(s.execute(select(Employee.company_id, func.count()).where(Employee.is_active).group_by(Employee.company_id)).all())
-    return [{"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": counts.get(c.id, 0)}
-            for c in s.scalars(select(CompanySettings).order_by(CompanySettings.id)).all()]
+def list_companies(request: Request):
+    user = request.state.user
+    with SessionLocal() as s:
+        counts = dict(s.execute(select(Employee.company_id, func.count()).where(Employee.is_active).group_by(Employee.company_id)).all())
+        return [{"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": counts.get(c.id, 0)}
+                for c in s.scalars(select(CompanySettings).order_by(CompanySettings.id)).all()
+                if user["is_admin"] or str(c.id) in user["memberships"]]
 
 
 @app.post("/api/companies", status_code=201)
-def create_company(body: CompanyIn, s: Session = Depends(db)):
-    name = " ".join(body.company_name.split())
-    if any(c.company_name.casefold() == name.casefold() for c in s.scalars(select(CompanySettings)).all()):
-        raise HTTPException(409, "A company with this name already exists")
-    c = CompanySettings(company_name=name)
-    s.add(c)
-    s.commit()
-    return {"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": 0}
+def create_company(body: CompanyIn, request: Request):
+    security.require_admin(request)
+    with SessionLocal() as s:
+        name = " ".join(body.company_name.split())
+        if any(c.company_name.casefold() == name.casefold() for c in s.scalars(select(CompanySettings)).all()):
+            raise HTTPException(409, "A company with this name already exists")
+        c = CompanySettings(company_name=name)
+        s.add(c)
+        s.commit()
+        return {"id": c.id, "company_name": c.company_name, "logo_path": c.logo_path, "employee_count": 0}
 
 
 @app.get("/api/settings")
@@ -427,12 +536,14 @@ async def save_image(file: UploadFile, prefix: str):
 
 
 @app.post("/api/upload/photo")
-async def upload_photo(file: UploadFile = File(...)):
+async def upload_photo(request: Request, file: UploadFile = File(...)):
+    require_editor(request)
     return await save_image(file, "photo")
 
 
 @app.post("/api/upload/logo")
-async def upload_logo(file: UploadFile = File(...)):
+async def upload_logo(request: Request, file: UploadFile = File(...)):
+    require_editor(request)
     return await save_image(file, "logo")
 
 
@@ -458,17 +569,21 @@ class ExportIn(BaseModel):
 def export_pdf(body: ExportIn, s: Session = Depends(db)):
     from pdf_export import make_pdf, make_chart_pdf
     data = org_chart(s)
-    # Board members with no manager appear only in the Board of Directors box (matches the chart).
+    # Board members with no manager appear only in the Board of Directors box (matches the chart);
+    # their direct reports keep a reporting line from that box.
     mgr = {e["target"] for e in data["edges"]}
     top = {e["id"] for e in data["nodes"] if e["is_board_member"] and e["id"] not in mgr}
+    board_kids = [e["target"] for e in data["edges"] if e["source"] in top]
     data["nodes"] = [e for e in data["nodes"] if e["id"] not in top]
     data["edges"] = [e for e in data["edges"] if e["source"] not in top]
     if body.scope == "visible":
         ids = set(body.ids)
         data["nodes"] = [e for e in data["nodes"] if e["id"] in ids]
-        if body.layout not in {"compact", "tree"}:
+        if body.layout is None:
             data["board"] = [e for e in data["board"] if e["id"] in ids]
         data["edges"] = [e for e in data["edges"] if e["source"] in ids and e["target"] in ids]
+    shown = {e["id"] for e in data["nodes"]}
+    data["board_kids"] = [k for k in board_kids if k in shown]
     if not data["nodes"]:
         raise HTTPException(400, "No employees to export")
     if body.layout:
@@ -476,7 +591,7 @@ def export_pdf(body: ExportIn, s: Session = Depends(db)):
         required = {str(e["id"]) for e in data["nodes"]}
         if body.layout == "radial":
             required.add("company")
-        elif data["board"]:
+        if data["board"]:
             required.add("board")
         if not required.issubset(positions) or len(positions) != len(body.positions):
             raise HTTPException(400, "Chart positions are incomplete or duplicated. Refresh the chart and try again.")
@@ -491,5 +606,30 @@ def export_pdf(body: ExportIn, s: Session = Depends(db)):
 
 # Production: serve the built frontend from the same port (run `npm run build` first).
 DIST = BASE.parent / "frontend" / "dist"
+class Frontend(StaticFiles):
+    """Built files under /assets are content-hashed (cache forever); pages must revalidate so a rebuild shows up."""
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if "/assets/" in str(args[0]).replace("\\", "/") else "no-cache"
+        return response
+
+
 if DIST.exists():
-    app.mount("/", StaticFiles(directory=DIST, html=True), name="frontend")
+    @app.get("/admin")
+    @app.get("/admin/{path:path}")
+    def admin_page(path: str = ""):
+        # The admin screens are part of the same single-page app, so deep links load index.html.
+        return FileResponse(DIST / "index.html", headers={"Cache-Control": "no-cache"})
+
+    app.mount("/", Frontend(directory=DIST, html=True), name="frontend")
+
+
+if __name__ == "__main__" and sys.argv[1:2] in (["create-admin"], ["reset-password"]):
+    import getpass
+    password = getpass.getpass("Password (12+ characters): ")
+    if sys.argv[1] == "create-admin":
+        security.bootstrap_admin(engine, sys.argv[2], password)
+        print("Administrator created.")
+    else:
+        security.reset_password(engine, sys.argv[2], password)
+        print("Password reset; existing sessions were signed out.")
